@@ -3,7 +3,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
-from scipy.signal import savgol_filter
 import sys
 
 plt.rcParams.update({'font.size': 12})
@@ -41,7 +40,6 @@ class spruit:
         self.lam0 = 6562.83
         self.delw = 80
         self.list = 'phases.txt'
-        self.overs = 0.3
         self.gama = 0.0
         self.delta_phase = 0.001
 
@@ -260,11 +258,8 @@ class spruit:
         """
         lam=self.lam0
         cl=2.997e5
-        xaxis='vel'
 
         cmaps = plt.cm.binary_r #cm.winter_r cm.Blues#cm.gist_stern
-        medi=17
-        line_lbl='K I'
 
         if lam < min(self.wave[0]) or lam > max(self.wave[0]):
             print('Error: input wavelength out of bounds.')
@@ -512,25 +507,26 @@ class spruit:
         ax2 = plt.subplot2grid((6, 1), (lo, 0), rowspan=4+si)
         ax2.minorticks_on()
         if vel_space:
-            x1_lim = (min(waver)-self.lam0)/self.lam0*2.998e5
-            x2_lim = (max(waver)-self.lam0)/self.lam0*2.998e5
-        else:
-            x1_lim = min(waver)
-            x2_lim = max(waver)
-        img = plt.imshow(trail.T,interpolation='nearest',
-                         cmap=plt.cm.binary,
-                         aspect='auto',origin='lower',
-                         extent=(x1_lim,
-                                 x2_lim,phase[0],phase[-1]+1/self.nbins))#
-                         #vmin=limits[0],vmax=limits[1])
-        if vel_space:
-            plt.xlim((self.lam0 - self.delw-self.lam0)/self.lam0*2.998e5,
-                     (self.lam0 + self.delw-self.lam0)/self.lam0*2.998e5)
+            x1_lim = float(np.nanmin(self.vell))
+            x2_lim = float(np.nanmax(self.vell))
+            img = plt.imshow(
+                trail.T, interpolation='nearest', cmap=plt.cm.binary, aspect='auto',
+                origin='lower', extent=(x1_lim, x2_lim, phase[0], phase[-1] + 1/self.nbins)
+            )
+            plt.xlim(x1_lim, x2_lim)
             plt.xlabel('Velocity / km s$^{-1}$')
+            plt.axvline(x=0.0, ls='--', color='DarkOrange')  # center of the line in velocity space
         else:
+            x1_lim = float(np.nanmin(self.normalised_wave))
+            x2_lim = float(np.nanmax(self.normalised_wave))
+            img = plt.imshow(
+                trail.T, interpolation='nearest', cmap=plt.cm.binary, aspect='auto',
+                origin='lower', extent=(x1_lim, x2_lim, phase[0], phase[-1] + 1/self.nbins)
+            )
             plt.xlim(self.lam0 - self.delw, self.lam0 + self.delw)
-            plt.xlabel('Wavelength / $\AA$')
-        plt.axvline(x=self.lam0,ls='--',color='DarkOrange')
+            plt.xlabel('Wavelength / $\\AA$')
+            plt.axvline(x=self.lam0, ls='--', color='DarkOrange')
+                  
         if two_orbits:
             lim_two = 2
         else:
@@ -752,7 +748,7 @@ class spruit:
 
         data[data == 0.0] = np.nan
 
-        new_data = (data - np.nanmin(data) )/np.nanmax(data)
+        new_data = (data - np.nanmin(data)) / (np.nanmax(data) - np.nanmin(data))
         #new_data = np.arcsinh(new_data)
         if limits == None:
             limits = [np.nanmax((new_data))*0.95,np.nanmax((new_data))*1.05]
@@ -800,7 +796,7 @@ class spruit:
                     vmin=limits[0],vmax=limits[1])
             else:
                 #print(np.nanmin(data),np.nanmax(data))
-                #new_data = (data - np.nanmin(data) )/np.nanmax(data)
+                #new_data = (data - np.nanmin(data)) / (np.nanmax(data) - np.nanmin(data))
                 #new_data = data
                 #print(np.nanmedian(data),np.nanstd(data))
                 print("Limits min={:6.3f}, max={:6.3f}".format(np.nanmin(new_data),np.nanmax(new_data)))
@@ -1783,3 +1779,4 @@ class MyNormalize(Normalize):
                             self.stretch)
 
         return vmin + val * (vmax - vmin)
+
