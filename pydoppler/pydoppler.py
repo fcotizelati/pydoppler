@@ -1,7 +1,6 @@
 #! Python PyDoppler
 
 import numpy as np
-import imp
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 from scipy.signal import savgol_filter
@@ -122,63 +121,99 @@ class spruit:
         Returns
         -------
         None
-
         """
-        try:
-            f = open(self.base_dir+'/'+self.list)
-            f.close()
-        except IOError:
-            print('Phase file - {} - is not accessible. Check "base_dir" and "list"'.format(self.base_dir+'/'+self.list))
-        inputs = np.loadtxt(self.base_dir+'/'+self.list,dtype={'names': ('files', 'phase'),'formats': ('S14', 'f4')})
-        # Check 1st spectrum and get wavelength to interpolate
-        #print()
-        #print(inputs['files'][0].astype('str'))
-        w1st = np.loadtxt(self.base_dir+'/'+inputs['files'][0].astype('str'),unpack=True)
-        if self.nbins==None:
-            self.nbins=int(1.5/np.abs(inputs['phase'][2]-inputs['phase'][1]))   #By default
-        if self.verbose:
-            print ("Number of Bins:",self.nbins,np.abs(inputs['phase'][2]-inputs['phase'][1]))
-        wave,flux=[],[]
-        for z,i in enumerate(inputs):
-            w,f=np.loadtxt(self.base_dir+'/'+i['files'].astype('str'),unpack=True)
-            print (str(z+1).zfill(3)+' '+i['files'].astype('str')+'  '+str(i['phase'])+' '+str(w.size))
-            if z == 0:
-                wo = w
-                wave.append(w),flux.append(f)
-            else:
-                wave.append(wo),flux.append(np.interp(wo,w,f))
-        delp=1.0/self.nbins
-        pha=np.arange(0,1,delp)
-        bin=np.arange(self.nbins+1)/float(self.nbins)
+        import os
+        import numpy as np
 
-        bin=np.concatenate((bin[:self.nbins]-1,bin))
-        wt=np.zeros(2*self.nbins)
-        trsp=np.zeros((2*self.nbins,len(wo)))
-        # Determine
-        dph = delp
-        for ph,il in zip(pha,np.arange(len(pha))):
-            ph0=ph-dph/2
-            ph1=ph+dph/2
-            for ib in np.arange(2*(self.nbins)):
-                r=bin[ib+1]
-                l=bin[ib]
-                if ph0 <= r and ph1> l:
-                    wph=min([r,ph1])-max([r,ph1])
-                    #print [r,ph1],[r,ph1],wph
-                    wt[ib]=wt[ib]+wph
-                    trsp[ib]=trsp[ib]+wph*flux[il]
-        wt[self.nbins:2*self.nbins]=wt[self.nbins:2*self.nbins]+wt[:self.nbins]
-        wt = wt[self.nbins:2*self.nbins]
-        trsp[self.nbins:2*self.nbins] = trsp[self.nbins:2*self.nbins] + trsp[:self.nbins]
-        trsp=trsp[self.nbins:2*self.nbins]
-        wt=wt/wt.sum()*float(self.nbins)
-        #print(wt)
-        self.wave = wave
-        self.flux = flux
-        self.pha = pha
-        self.input_files = inputs['files'].astype('str')
-        self.input_phase = inputs['phase']
-        self.trsp = trsp
+        # --- resolve paths & basic checks
+        list_path = os.path.join(self.base_dir, self.list)
+        try:
+            with open(list_path, "r"):
+                pass
+        except IOError:
+            print(f'Phase file - {list_path} - is not accessible. Check "base_dir" and "list"')
+            return
+
+        # Also remember the directory of the list file, so relative spectrum paths work
+        list_dir = os.path.dirname(os.path.abspath(list_path))
+
+        # --- read only the first two columns from the list file: filename, phase
+        # Force Unicode dtype for filenames to avoid bytes (b'...') paths.
+        inputs = np.genfromtxt(
+            list_path,
+            dtype=[("files", "U256"), ("phase", float)],
+            usecols=(0, 1),
+            comments="#",
+            autostrip=True,
+        )
+
+        # handle the case of a single line (genfromtxt returns 0-d recarray)
+        if inputs.shape == ():
+            inputs = inputs.reshape(1,)
+
+        if inputs.size < 1:
+            raise ValueError("No entries found in the list file.")
+
+        # --- load the first spectrum to set the wavelength grid
+        first_file = inputs["files"][0]  # already a str (unicode)
+        first_path = os.path.join(list_dir, first_file)
+
+        try:
+            # read only the first two columns: wavelength, flux
+            w1st, f1st = np.loadtxt(first_path, usecols=(0, 1), unpack=True)
+        except Exception as e:
+            raise RuntimeError(f"Failed to read first spectrum '{first_path}': {e}")
+
+        wo = w1st  # output wavelength grid
+        wave, flux = [], []
+
+        # --- determine nbins if not provided: use median positive phase spacing
+        if getattr(self, "nbins", None) is None:
+            phases_sorted = np.sort(np.asarray(inputs["phase"], dtype=float))
+            dphi = np.diff(phases_sorted)
+            dphi = dphi[dphi > 0]
+            if dphi.size == 0:
+                self.nbins = 20
+            else:
+                self.nbins = int(max(4, round(1.5 / float(np.median(dphi)))))
+
+        if self.verbose:
+            try:
+                rep_dphi = float(np.median(np.diff(np.sort(inputs["phase"]))))
+            except Exception:
+                rep_dphi = float("nan")
+            print("Number of Bins:", self.nbins, rep_dphi)
+
+        # --- read all spectra; interpolate onto 'wo' as needed
+        for z, (fname, ph) in enumerate(zip(inputs["files"], inputs["phase"])):
+            sp_path = os.path.join(list_dir, fname)
+            try:
+                w, f = np.loadtxt(sp_path, usecols=(0, 1), unpack=True)
+            except Exception as e:
+                raise RuntimeError(f"Failed to read spectrum '{sp_path}': {e}")
+
+            if z == 0:
+                wave.append(wo)
+                flux.append(f1st)
+            else:
+                wave.append(wo)
+                # interpolate onto the first spectrum's wavelength grid
+                flux.append(np.interp(wo, w, f))
+
+            if self.verbose:
+                print(f"{str(z+1).zfill(3)} {fname}  {ph} {w.size}")
+
+        # --- store results on the instance
+        self.wave = wave                               # list of arrays, all on 'wo'
+        self.flux = flux                               # list of arrays interpolated to 'wo'
+        self.pha = np.asarray(inputs["phase"], float)  # phases per input spectrum
+        self.input_files = np.asarray(inputs["files"], dtype=str)
+        self.input_phase = np.asarray(inputs["phase"], dtype=float)
+
+        # No phase binning here; Dopin/rebin_trail will handle it properly.
+        # Provide a simple stacked representation of input spectra on the common grid.
+        self.trsp = np.vstack(flux)                    # shape: (nspec, nwave)
+
 
     def Dopin(self,poly_degree=2, continnum_band=False,
               rebin=True,plot_median = False, rebin_wave= 0.,
@@ -473,10 +508,7 @@ class spruit:
             #plt.xlim(self.lam0 - self.delw, self.lam0 + self.delw)
             plt.ylim(-0.05,np.nanmax(np.nanmedian(self.normalised_flux,
                                                   axis=0)[rr])*1.1)
-            ### Print trail spectra
-            if limits == None:
-                limits=[np.nanmax(np.nanmedian(grid,axis=0)[rr])*0.35,
-                    np.nanmax(np.nanmedian(grid,axis=0)[rr])*1.1]
+
         ax2 = plt.subplot2grid((6, 1), (lo, 0), rowspan=4+si)
         ax2.minorticks_on()
         if vel_space:
@@ -602,8 +634,8 @@ class spruit:
             #print(clim,rr)
             if self.verbose: print ('----------------------------')
             if lines[-1].split()[0] == 'projection':
-                nri = np.float(lines[-1].split()[-1])/np.float(lines[-2].split()[-1])
-                ndi = np.float(lines[-1].split()[-2])/np.float(lines[-2].split()[-2])
+                nri = float(lines[-1].split()[-1])/float(lines[-2].split()[-1])
+                ndi = float(lines[-1].split()[-2])/float(lines[-2].split()[-2])
                 print('>> PROJECTION MATRIX TOO SMALL <<')
                 print('>> Recomputing with values from Spruit:')
                 print('>> ndi = {}, nri = {}'.format(ndi,nri))
@@ -683,15 +715,15 @@ class spruit:
         #print(war)
         if self.verbose:
             print(">> Finished reading dop.out file")
-        pha=np.array(war[:nph]).astype(np.float)/2.0/np.pi
+        pha=np.array(war[:nph]).astype(float)/2.0/np.pi
         dum1=war[nph]
-        dpha=np.array(war[nph+1:nph+1+nph]).astype(np.float)/2.0/np.pi
+        dpha=np.array(war[nph+1:nph+1+nph]).astype(float)/2.0/np.pi
         last=nph+1+nph
-        vp=np.array(war[last:last+nvp]).astype(np.float)
+        vp=np.array(war[last:last+nvp]).astype(float)
         dvp=vp[1]-vp[0]
         vp=vp-dvp/2.0
         last=last+nvp
-        dm=np.array(war[last:last+nvp*nph]).astype(np.float)
+        dm=np.array(war[last:last+nvp*nph]).astype(float)
         dm=dm.reshape(nvp,nph)
         last=last+nvp*nph
 
@@ -701,18 +733,18 @@ class spruit:
         nv,va,dd=int(war[last+11]),float(war[last+12]),war[last+13]
         last=last+14
 
-        im=np.array(war[last:last+nv*nv]).astype(np.float)
+        im=np.array(war[last:last+nv*nv]).astype(float)
         im=im.reshape(nv,nv)
 
         last=last+nv*nv
         ndum,dum2,dum3=int(war[last]),war[last+1],war[last+2]
         last=last+3
-        dmr=np.array(war[last:last+nvp*nph]).astype(np.float)
+        dmr=np.array(war[last:last+nvp*nph]).astype(float)
         dmr=dmr.reshape(nvp,nph)
         last=last+nvp*nph
         ndum,dum4,dum2,dum3=int(war[last]),int(war[last+1]),war[last+2],war[last+3]
         last=last+4
-        dpx=np.array(war[last:last+nv*nv]).astype(np.float)
+        dpx=np.array(war[last:last+nv*nv]).astype(float)
         dpx=dpx.reshape(nv,nv)
         dpx = np.array(dpx)
         vp = np.array(vp)/1e5
@@ -863,15 +895,15 @@ class spruit:
         war = ''.join(new.splitlines()).split()
         #print(war)
         #print(">> Finished reading dop.out file")
-        pha=np.array(war[:nph]).astype(np.float)/2.0/np.pi
+        pha=np.array(war[:nph]).astype(float)/2.0/np.pi
         dum1=war[nph]
-        dpha=np.array(war[nph+1:nph+1+nph]).astype(np.float)/2.0/np.pi
+        dpha=np.array(war[nph+1:nph+1+nph]).astype(float)/2.0/np.pi
         last=nph+1+nph
-        vp=np.array(war[last:last+nvp]).astype(np.float)
+        vp=np.array(war[last:last+nvp]).astype(float)
         dvp=vp[1]-vp[0]
         vp=vp-dvp/2.0
         last=last+nvp
-        dm=np.array(war[last:last+nvp*nph]).astype(np.float)
+        dm=np.array(war[last:last+nvp*nph]).astype(float)
         dm=dm.reshape(nvp,nph)
         last=last+nvp*nph
 
@@ -881,18 +913,18 @@ class spruit:
         nv,va,dd=int(war[last+11]),float(war[last+12]),war[last+13]
         last=last+14
 
-        im=np.array(war[last:last+nv*nv]).astype(np.float)
+        im=np.array(war[last:last+nv*nv]).astype(float)
         im=im.reshape(nv,nv)
 
         last=last+nv*nv
         ndum,dum2,dum3=int(war[last]),war[last+1],war[last+2]
         last=last+3
-        dmr=np.array(war[last:last+nvp*nph]).astype(np.float)
+        dmr=np.array(war[last:last+nvp*nph]).astype(float)
         dmr=dmr.reshape(nvp,nph)
         last=last+nvp*nph
         ndum,dum4,dum2,dum3=int(war[last]),int(war[last+1]),war[last+2],war[last+3]
         last=last+4
-        dpx=np.array(war[last:last+nv*nv]).astype(np.float)
+        dpx=np.array(war[last:last+nv*nv]).astype(float)
         dpx=dpx.reshape(nv,nv)
         dpx = np.array(dpx)
         vp = np.array(vp)/1e5
@@ -968,52 +1000,67 @@ class spruit:
 
 def rebin_trail(waver, flux, input_phase, nbins, delp, rebin_wave=None):
     """
+    Re-bin a set of spectra (flux[i] sampled at waver) onto an orbital-phase grid.
 
+    Parameters
+    ----------
+    waver : 1D array
+        Common wavelength/velocity sampling for each flux[i].
+    flux : 2D array, shape (nspec, nwave)
+        Spectra to rebin in phase.
+    input_phase : 1D array, shape (nspec,)
+        Orbital phase (0..1) for each spectrum in `flux`.
+    nbins : int
+        Number of phase bins in [0,1).
+    delp : float
+        Effective phase width per spectrum for bin-weighting (typically ~1/nbins).
+    rebin_wave : None
+        (Kept for API compatibility; not used because `flux` is already on `waver`.)
+
+    Returns
+    -------
+    trail : 2D array, shape (nwave, 2*nbins+2)
+        Phase-binned trail spectrum covering ~[0,2] for plotting two orbits.
+    phase : 1D array, shape (2*nbins+2,)
+        Phase coordinate for `trail` columns.
     """
-    phase = np.linspace(0,2,nbins*2+1,endpoint=True) - 1./(nbins)/2.
-    phase = np.concatenate((phase,[2.0+1./(nbins)/2.]))
+    # two orbits + half-bin shift, like upstream
+    phase = np.linspace(0, 2, nbins * 2 + 1, endpoint=True) - 1.0 / nbins / 2.0
+    phase = np.concatenate((phase, [2.0 + 1.0 / nbins / 2.0]))
     phase_dec = phase - np.floor(phase)
 
-    trail = np.zeros((waver.size,phase.size))
+    nw = waver.size
+    trail = np.zeros((nw, phase.size), dtype=float)
+    tots = np.zeros(phase.size, dtype=float)
 
-    tots = trail.copy()
-    #print(phases.size)
+    inv_bin = 1.0 / nbins
+    half = delp / 2.0
+
     for i in range(input_phase.size):
-        #print("spec phase = ",grid['phase'][i])
-        dist = phase_dec - (input_phase[i]+delp/2.)
-        #print(dist)
-        dist[np.abs(dist)>1./nbins] = 0.
-        #print(dist/delpha)
-        dist[dist>0] = 0.0
-        #print(dist)
-        weights = np.abs(dist)/(1./nbins)
-        #print(weights)
-        #print('---------------')
-        dist = phase_dec - (input_phase[i]-delp/2.)
-        #print(dist)
-        dist[np.abs(dist)>1./nbins] = 0.0
-        #print(dist)
-        dist[dist>0] = 0.0
-        #print(dist/delpha)
-        dist[np.abs(dist)>0] = 1.0 - (np.abs(dist[np.abs(dist)>0]))/(1./nbins)
-        weights += dist
-        #print(weights)
-        temp = trail.copy().T
+        # build trapezoidal weights for interval [phi - half, phi + half]
+        phi = input_phase[i]
+        wts = np.zeros_like(phase_dec)
+        # right edge
+        d = phase_dec - (phi + half)
+        d[np.abs(d) > inv_bin] = 0.0
+        d[d > 0] = 0.0
+        wts += np.abs(d) / inv_bin
+        # left edge
+        d = phase_dec - (phi - half)
+        d[np.abs(d) > inv_bin] = 0.0
+        d[d > 0] = 0.0
+        mask = (np.abs(d) > 0)
+        wts[mask] += 1.0 - (np.abs(d[mask]) / inv_bin)
 
-        for j in range(phase.size):
-            if rebin_wave == None:
-                temp[j] =  flux[i] * weights[j]
-                temp[j] =  flux[i] * weights[j]
-            else:
-                temp[j] = np.interp(waver,wave[rr],
-                          flux[i]) * weights[j]
-                temp[j] = np.interp(waver,wave[rr],
-                          slux[i]) * weights[j]
-        trail+=temp.T
-        tots += weights
+        # accumulate
+        trail += np.outer(flux[i], wts)
+        tots += wts
 
+    # avoid division by zero
+    tots[tots == 0] = 1.0
     trail /= tots
-    return trail,phase
+    return trail, phase
+
 
 class DraggableColorbar(object):
     def __init__(self, cbar, mappable):
@@ -1094,7 +1141,7 @@ def radial_profile(data, center):
     """Calculate radial profile for Dopple map"""
     y, x = np.indices((data.shape))
     r = np.sqrt((x - center[0])**2 + (y - center[1])**2)
-    r = r.astype(np.int)
+    r = r.astype(int)
 
     tbin = np.bincount(r.ravel(), data.ravel())
     nr = np.bincount(r.ravel())
@@ -1104,7 +1151,7 @@ def radial_profile(data, center):
 def create_profile(data,profile, center):
     y, x = np.indices((data.shape))
     r = np.sqrt((x - center[0])**2 + (y - center[1])**2)
-    r = r.astype(np.int)
+    r = r.astype(int)
     mean = data*0.0 + 1.0
     for i in np.arange(r.max()):
     	#print i
@@ -1208,8 +1255,8 @@ def stream_calculate(qm,ni = 100,nj = 100):
     xout = np.zeros(nmax)
     yout = np.zeros(nmax)
     rout = np.zeros(nmax)
-    wout = np.zeros(nmax,dtype=np.complex)
-    wkout = np.zeros(nmax,dtype=np.complex)
+    wout = np.zeros(nmax,dtype=complex)
+    wkout = np.zeros(nmax,dtype=complex)
     if np.abs(qm - 1.) < 1e-4: qm = 1e-4
     rd = 0.1
     if qm <= 0.0:
@@ -1223,10 +1270,10 @@ def stream_calculate(qm,ni = 100,nj = 100):
     ## Coordinates of M1 and M2
     z1=-cm
     z2=1-cm
-    wm1=np.conj(np.complex(0.,-cm))
+    wm1=np.conj(complex(0.,-cm))
     ## Start at L1-eps with v=0
     eps=1e-3
-    z = np.complex(rl1 - cm -eps,0.)
+    z = complex(rl1 - cm -eps,0.)
     w = 0
     zp,wp = eqmot(z,w,z1,z2,qm)
     t=0
@@ -1249,7 +1296,7 @@ def stream_calculate(qm,ni = 100,nj = 100):
         ph=ph+dph
         ##velocity in inertial frame
         ##change by Guillaume
-        wi=w+np.complex(0,1.)*z
+        wi=w+complex(0,1.)*z
         ## unit vector normal to kepler orbit
         rold=r
         r=np.abs(z-z1)
@@ -1262,7 +1309,7 @@ def stream_calculate(qm,ni = 100,nj = 100):
         vk=1.0/np.sqrt(r*(1.0+qm))
         # unit vector in r
         no = np.conj(z-z1)/r
-        wk = -vk*no*np.complex(0.,1.)
+        wk = -vk*no*complex(0.,1.)
         # same but rel. to cm, this is velocity in inertial frame
         wk = wk+wm1
         # velocity normal to disk edge, in rotating frame
@@ -1294,7 +1341,7 @@ def stream_calculate(qm,ni = 100,nj = 100):
         if isa == 0 and yout[it] < 0:
             isa=1
             ra=np.abs(z-z1)
-            wc=np.conj(w)+np.complex(0.,1.)*np.conj(z-z1)
+            wc=np.conj(w)+complex(0.,1.)*np.conj(z-z1)
             ang=np.abs(np.imag((z-z1)*np.conj(wc)))
         it+=1
     return x,y,xout,yout,wout,wkout
@@ -1432,7 +1479,7 @@ def eqmot(z,w,z1,z2,qm):
     zr1 = z-z1
     zr2 = z-z2
     ## c change by Guillaume : - sign in Coriolis
-    wp=-(qm*zr2/(np.abs(zr2))**3+zr1/(np.abs(zr1))**3)/(1.0+qm)-np.complex(0.,2.)*w+z
+    wp = -(qm*zr2/(np.abs(zr2))**3 + zr1/(np.abs(zr1))**3)/(1.0+qm) - complex(0.,2.)*w + z
     zp = w
     return zp,wp
 
@@ -1634,10 +1681,10 @@ class MyNormalize(Normalize):
 
         if cbook.iterable(value):
             vtype = 'array'
-            val = ma.asarray(value).astype(np.float)
+            val = ma.asarray(value).astype(float)
         else:
             vtype = 'scalar'
-            val = ma.array([value]).astype(np.float)
+            val = ma.array([value]).astype(float)
 
         self.autoscale_None(val)
         vmin, vmax = self.vmin, self.vmax

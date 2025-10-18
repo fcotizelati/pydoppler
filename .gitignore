@@ -1,2 +1,6 @@
 
 *.whl
+
+# macOS
+.DS_Store
+pydoppler/.DS_Store
