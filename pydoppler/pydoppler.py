@@ -441,11 +441,11 @@ class spruit:
                         plt.draw()
             else:
                 xor=list(self._auto_continuum_band())
-                self._log(
-                    logging.INFO,
+                message = (
                     "Using automatic continuum bands at "
-                    f"[{xor[0]:.2f}, {xor[1]:.2f}] and [{xor[2]:.2f}, {xor[3]:.2f}] Å.",
+                    f"[{xor[0]:.2f}, {xor[1]:.2f}] and [{xor[2]:.2f}, {xor[3]:.2f}] Å."
                 )
+                self._log(logging.INFO, message)
                 if self.plot:
                     for idx,val in enumerate(xor):
                         label='Cont Bands' if idx == 0 else ''

@@ -50,6 +50,8 @@ include = ["pydoppler*"]
 [tool.setuptools.package-data]
 pydoppler = [
   "fortran_code/*",
+  "fortran_code/**/*",
   "test_data/*",
+  "test_data/**/*",
 ]
 
