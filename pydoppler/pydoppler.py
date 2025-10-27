@@ -6,7 +6,7 @@ import logging
 import os
 import shutil
 from pathlib import Path
-from typing import List, Optional, Sequence
+from typing import List, Optional, Sequence, Union
 
 import matplotlib.cm as cm
 import matplotlib.collections as mcoll
@@ -75,20 +75,24 @@ def get_test_data_path():
     return resource_files(__package__).joinpath("test_data")
 
 
-def copy_fortran_code(destination: Path | str, overwrite: bool = False) -> List[Path]:
+def copy_fortran_code(
+    destination: Union[Path, str], overwrite: bool = False
+) -> List[Path]:
     """Copy the bundled Fortran assets into *destination*."""
 
     return _copy_tree(get_fortran_code_path(), Path(destination), overwrite)
 
 
-def copy_test_data(destination: Path | str, overwrite: bool = False) -> List[Path]:
+def copy_test_data(
+    destination: Union[Path, str], overwrite: bool = False
+) -> List[Path]:
     """Copy the bundled sample data into *destination*."""
 
     return _copy_tree(get_test_data_path(), Path(destination), overwrite)
 
 
 def install_sample_script(
-    destination: Path | str,
+    destination: Union[Path, str],
     overwrite: bool = False,
 ) -> Path:
     """Install the example ``sample_script.py`` in *destination*.
@@ -200,7 +204,9 @@ class spruit:
         if self.verbose and level >= logging.INFO:
             print(message)
 
-    def install_assets(self, destination: Path | str, force: bool = False) -> None:
+    def install_assets(
+        self, destination: Union[Path, str], force: bool = False
+    ) -> None:
         """Install bundled assets into *destination*.
 
         Parameters
@@ -1747,7 +1753,10 @@ def make_segments(x, y):
     segments = np.concatenate([points[:-1], points[1:]], axis=1)
     return segments
 
-def test_data(destination: Optional[Path | str] = None, overwrite: bool = False) -> List[Path]:
+def test_data(
+    destination: Optional[Union[Path, str]] = None,
+    overwrite: bool = False,
+) -> List[Path]:
     """Copy the bundled test data into *destination* (defaults to CWD)."""
 
     dest_dir = Path.cwd() if destination is None else Path(destination)
