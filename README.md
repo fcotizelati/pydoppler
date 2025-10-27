@@ -41,23 +41,48 @@
 
   If you need to upgrade the package to the latest version, you can do this with
   ```
-  pip install pydoppler -upgrade
+  pip install --upgrade pydoppler
   ```
 
   ##  Section 1:  Usage
 
-  You can use the sample_script.py file to run all the relevant commands
+  You can use the ``sample_script.py`` file to run all the relevant commands
   _shown in sections 2 and 3_ from a terminal command line as:
   ```
-  python sample_scipt.py
+  python sample_script.py
   ```
   or in a python console:
   ```python
-  run sample_scipt.py
+  run sample_script.py
   ```
   This will read all the files, normalise the spectra, perform Doppler
   tomography and output the results. In the following sections, I will briefly
   explain each main routine.
+
+  ### Quick start for automated workflows
+
+  The package bundles helper utilities that simplify scripting and CI usage. For example:
+
+  ```python
+  from pathlib import Path
+
+  import pydoppler
+
+  # Copy bundled resources without shelling out to ``cp``
+  pydoppler.copy_fortran_code(Path.cwd())
+  script_path = pydoppler.install_sample_script(Path.cwd())
+
+  dop = pydoppler.spruit(interactive=False)
+  dop.base_dir = "ugem99"
+  dop.list = "ugem0all.fas"
+  dop.Foldspec()
+  dop.Dopin()  # continuum bands are estimated automatically when non-interactive
+  ```
+
+  When ``interactive`` is disabled, the continuum bands are determined automatically so the
+  normalisation step can run in headless or automated environments. Informational output is
+  routed through Python's :mod:`logging` module; configure it to surface diagnostics that were
+  previously printed to stdout.
 
   ##  Section 2: How to load data
 
@@ -115,11 +140,12 @@
   Before running any routines, verify that you have added all the relevant
   parameters into the PyDoppler object.
 
-  * _NOTE:_ The pydoppler.spruit() will also copy into the working directory
-  a copy of a sample script (sample_scipt.py) with all the commands in the
-  following tutorial. The code will add a new script (e.g. sample_scipt-1.py)
-  if you use the "install_force=True" keyword, it will not overwrite the one
-  found in the directory.
+  * _NOTE:_ The ``pydoppler.spruit()`` constructor can copy the bundled Fortran
+  sources and provide a sample script (``sample_script.py``) with all the commands in the
+  following tutorial. The code will add a new script (e.g. ``sample_script-1.py``)
+  if you use the ``force_install=True`` keyword, it will not overwrite the one
+  found in the directory. Set ``auto_install=False`` if you prefer to manage the
+  resources manually.
 
   ```python
   import pydoppler
