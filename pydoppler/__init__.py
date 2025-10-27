@@ -1,4 +1,25 @@
-__modules__ = ['pydoppler']
-from .pydoppler import spruit, rebin_trail, stream, test_data
+from .pydoppler import (
+    copy_fortran_code,
+    copy_test_data,
+    get_fortran_code_path,
+    get_test_data_path,
+    install_sample_script,
+    rebin_trail,
+    spruit,
+    stream,
+    test_data,
+)
 
-__version__ = "0.2.0"
+__all__ = [
+    "copy_fortran_code",
+    "copy_test_data",
+    "get_fortran_code_path",
+    "get_test_data_path",
+    "install_sample_script",
+    "rebin_trail",
+    "spruit",
+    "stream",
+    "test_data",
+]
+
+__version__ = "0.3.0"
