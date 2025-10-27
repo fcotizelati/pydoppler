@@ -1,15 +1,123 @@
 #! Python PyDoppler
 
-import numpy as np
-import matplotlib.pyplot as plt
+from __future__ import annotations
+
+import logging
+import os
+import shutil
+from pathlib import Path
+from typing import List, Optional, Sequence, Union
+
 import matplotlib.cm as cm
-import sys
+import matplotlib.collections as mcoll
+import matplotlib.cbook as cbook
+import matplotlib.pyplot as plt
+import numpy as np
+import numpy.ma as ma
+from matplotlib.colors import Normalize
+
+try:  # Python 3.9+
+    from importlib.resources import files as resource_files
+except ImportError:  # pragma: no cover - Python <3.9 fallback
+    from importlib_resources import files as resource_files  # type: ignore
+
 
 plt.rcParams.update({'font.size': 12})
 
-import os
 
-plt.ion()
+LOGGER = logging.getLogger(__name__)
+LOGGER.addHandler(logging.NullHandler())
+
+
+def _copy_tree(source, destination: Path, overwrite: bool = False) -> List[Path]:
+    """Copy the files contained in *source* into *destination*.
+
+    Parameters
+    ----------
+    source:
+        An importlib ``Traversable`` pointing to a directory.
+    destination:
+        Filesystem directory that will receive the copied files.
+    overwrite:
+        When ``True`` existing files will be replaced, otherwise they are kept
+        untouched.
+    """
+
+    dest_path = Path(destination)
+    dest_path.mkdir(parents=True, exist_ok=True)
+
+    copied: List[Path] = []
+    for item in source.rglob("*"):
+        if item.is_dir():
+            continue
+
+        target = dest_path / item.relative_to(source)
+        if target.exists() and not overwrite:
+            continue
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with item.open("rb") as src, target.open("wb") as dst:
+            shutil.copyfileobj(src, dst)
+        copied.append(target)
+
+    return copied
+
+
+def get_fortran_code_path():
+    """Return a Traversable pointing to the bundled Fortran sources."""
+
+    return resource_files(__package__).joinpath("fortran_code")
+
+
+def get_test_data_path():
+    """Return a Traversable pointing to the bundled test data."""
+
+    return resource_files(__package__).joinpath("test_data")
+
+
+def copy_fortran_code(
+    destination: Union[Path, str], overwrite: bool = False
+) -> List[Path]:
+    """Copy the bundled Fortran assets into *destination*."""
+
+    return _copy_tree(get_fortran_code_path(), Path(destination), overwrite)
+
+
+def copy_test_data(
+    destination: Union[Path, str], overwrite: bool = False
+) -> List[Path]:
+    """Copy the bundled sample data into *destination*."""
+
+    return _copy_tree(get_test_data_path(), Path(destination), overwrite)
+
+
+def install_sample_script(
+    destination: Union[Path, str],
+    overwrite: bool = False,
+) -> Path:
+    """Install the example ``sample_script.py`` in *destination*.
+
+    When ``overwrite`` is ``False`` the script will not clobber an existing
+    file. Instead it will fall back to the ``sample_script-<n>.py`` naming
+    convention previously used by the project.
+    """
+
+    dest_dir = Path(destination)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    target = dest_dir / "sample_script.py"
+    if target.exists() and not overwrite:
+        index = 1
+        while target.exists():
+            target = dest_dir / f"sample_script-{index}.py"
+            index += 1
+
+    source = get_test_data_path().joinpath("sample_script.py")
+    with source.open("rb") as src, target.open("wb") as dst:
+        shutil.copyfileobj(src, dst)
+
+    return target
+
 
 class spruit:
     """
@@ -25,7 +133,12 @@ class spruit:
     sort(column, order='ascending')
         Sort by `column`
     """
-    def __init__(self,force_install = False):
+    def __init__(
+        self,
+        force_install: bool = False,
+        auto_install: bool = True,
+        interactive: bool = False,
+    ):
         self.object = 'disc'
         self.wave = 0.0
         self.flux = 0.0
@@ -44,6 +157,10 @@ class spruit:
         self.delta_phase = 0.001
 
         self.verbose = True
+        self.interactive = interactive
+        self.logger = logging.getLogger(f"{__name__}.spruit")
+        if not self.logger.handlers:
+            self.logger.addHandler(logging.NullHandler())
 
         ###### Plotting parameters
         self.psname='j0644'              # Name of output plot file
@@ -74,38 +191,49 @@ class spruit:
         # %%%%%%%%%%%%%%%%%%  Doppler Options   %%%%%%%%%%%%%%%%%%
 
         self.lobcol='white'                 # Stream color
-        self.module_path = os.path.dirname(os.path.realpath(__file__))
 
-        #### Copy Fortran files to local directory
+        if auto_install:
+            self.install_assets(Path.cwd(), force_install)
 
-        if os.path.isfile("dop.f"):
-            #print("Fortran code exists")
-            if force_install:
-                print("-- Force_Install --")
-                os.system('cp '+self.module_path+'/fortran_code/* ./.')
-                count = 0
-                dst_file = './sample_script.py'
-                while os.path.exists(dst_file):
-                    count += 1
-                    dst_file = './%s-%d%s' % ('sample_script', count, '.py')
-                #print 'Renaming %s to %s' % (file, dst_file)
-                print("PyDoppler scipt -->",dst_file)
-                #os.rename(file, dst_file)
-                os.system('cp '+self.module_path+'/test_data/sample_script.py '+\
-                          dst_file)
+    # ------------------------------------------------------------------
+    # helper methods
+    def _log(self, level: int, message: str) -> None:
+        """Emit *message* through :mod:`logging` and optionally echo it."""
+
+        self.logger.log(level, message)
+        if self.verbose and level >= logging.INFO:
+            print(message)
+
+    def install_assets(
+        self, destination: Union[Path, str], force: bool = False
+    ) -> None:
+        """Install bundled assets into *destination*.
+
+        Parameters
+        ----------
+        destination:
+            Directory where the Fortran sources and helper script should be
+            installed.
+        force:
+            When ``True`` existing files are overwritten.
+        """
+
+        dest_dir = Path(destination)
+
+        copied_fortran = copy_fortran_code(dest_dir, overwrite=force)
+        script_path: Optional[Path] = None
+        if force or copied_fortran:
+            script_path = install_sample_script(dest_dir, overwrite=force)
+
+        if copied_fortran:
+            self._log(logging.INFO, f"Installed Fortran assets into {dest_dir}.")
         else:
-            print("-- Copying fortran code --")
-            os.system('cp '+self.module_path+'/fortran_code/* ./.')
-            count = 0
-            dst_file = './sample_script.py'
-            while os.path.exists(dst_file):
-                count += 1
-                dst_file = './%s-%d%s' % ('sample_script', count, '.py')
-            #print 'Renaming %s to %s' % (file, dst_file)
-            print("PyDoppler scipt -->",dst_file)
-            #os.rename(file, dst_file)
-            os.system('cp '+self.module_path+'/test_data/sample_script.py '+\
-                      dst_file)
+            self._log(logging.DEBUG, "Fortran assets already present; skipping copy.")
+
+        if script_path:
+            self._log(logging.INFO, f"Sample script available at {script_path}.")
+        else:
+            self._log(logging.DEBUG, "Sample script already present; not copied.")
 
 
     def Foldspec(self):
@@ -120,23 +248,14 @@ class spruit:
         -------
         None
         """
-        import os
-        import numpy as np
+        list_path = Path(self.base_dir) / self.list
+        if not list_path.exists():
+            raise FileNotFoundError(
+                f"Phase file '{list_path}' is not accessible. Check 'base_dir' and 'list'."
+            )
 
-        # --- resolve paths & basic checks
-        list_path = os.path.join(self.base_dir, self.list)
-        try:
-            with open(list_path, "r"):
-                pass
-        except IOError:
-            print(f'Phase file - {list_path} - is not accessible. Check "base_dir" and "list"')
-            return
+        list_dir = list_path.parent
 
-        # Also remember the directory of the list file, so relative spectrum paths work
-        list_dir = os.path.dirname(os.path.abspath(list_path))
-
-        # --- read only the first two columns from the list file: filename, phase
-        # Force Unicode dtype for filenames to avoid bytes (b'...') paths.
         inputs = np.genfromtxt(
             list_path,
             dtype=[("files", "U256"), ("phase", float)],
@@ -145,27 +264,23 @@ class spruit:
             autostrip=True,
         )
 
-        # handle the case of a single line (genfromtxt returns 0-d recarray)
         if inputs.shape == ():
             inputs = inputs.reshape(1,)
 
         if inputs.size < 1:
             raise ValueError("No entries found in the list file.")
 
-        # --- load the first spectrum to set the wavelength grid
-        first_file = inputs["files"][0]  # already a str (unicode)
-        first_path = os.path.join(list_dir, first_file)
+        first_file = inputs["files"][0]
+        first_path = list_dir / first_file
 
         try:
-            # read only the first two columns: wavelength, flux
             w1st, f1st = np.loadtxt(first_path, usecols=(0, 1), unpack=True)
-        except Exception as e:
-            raise RuntimeError(f"Failed to read first spectrum '{first_path}': {e}")
+        except Exception as exc:  # pragma: no cover - numpy handles the heavy lifting
+            raise RuntimeError(f"Failed to read first spectrum '{first_path}': {exc}") from exc
 
-        wo = w1st  # output wavelength grid
+        wo = w1st
         wave, flux = [], []
 
-        # --- determine nbins if not provided: use median positive phase spacing
         if getattr(self, "nbins", None) is None:
             phases_sorted = np.sort(np.asarray(inputs["phase"], dtype=float))
             dphi = np.diff(phases_sorted)
@@ -175,42 +290,70 @@ class spruit:
             else:
                 self.nbins = int(max(4, round(1.5 / float(np.median(dphi)))))
 
-        if self.verbose:
-            try:
-                rep_dphi = float(np.median(np.diff(np.sort(inputs["phase"]))))
-            except Exception:
-                rep_dphi = float("nan")
-            print("Number of Bins:", self.nbins, rep_dphi)
+        try:
+            rep_dphi = float(np.median(np.diff(np.sort(inputs["phase"]))))
+        except Exception:  # pragma: no cover - extremely small data set
+            rep_dphi = float("nan")
 
-        # --- read all spectra; interpolate onto 'wo' as needed
+        self._log(
+            logging.INFO,
+            f"Number of bins: {self.nbins} (median phase spacing {rep_dphi:.5f})",
+        )
+
         for z, (fname, ph) in enumerate(zip(inputs["files"], inputs["phase"])):
-            sp_path = os.path.join(list_dir, fname)
+            sp_path = list_dir / fname
             try:
                 w, f = np.loadtxt(sp_path, usecols=(0, 1), unpack=True)
-            except Exception as e:
-                raise RuntimeError(f"Failed to read spectrum '{sp_path}': {e}")
+            except Exception as exc:
+                raise RuntimeError(f"Failed to read spectrum '{sp_path}': {exc}") from exc
 
             if z == 0:
                 wave.append(wo)
                 flux.append(f1st)
             else:
                 wave.append(wo)
-                # interpolate onto the first spectrum's wavelength grid
                 flux.append(np.interp(wo, w, f))
 
-            if self.verbose:
-                print(f"{str(z+1).zfill(3)} {fname}  {ph} {w.size}")
+            self._log(
+                logging.INFO,
+                f"{str(z + 1).zfill(3)} {fname}  {ph} {w.size}",
+            )
 
-        # --- store results on the instance
-        self.wave = wave                               # list of arrays, all on 'wo'
-        self.flux = flux                               # list of arrays interpolated to 'wo'
-        self.pha = np.asarray(inputs["phase"], float)  # phases per input spectrum
+        self.wave = wave
+        self.flux = flux
+        self.pha = np.asarray(inputs["phase"], float)
         self.input_files = np.asarray(inputs["files"], dtype=str)
         self.input_phase = np.asarray(inputs["phase"], dtype=float)
+        self.trsp = np.vstack(flux)
 
-        # No phase binning here; Dopin/rebin_trail will handle it properly.
-        # Provide a simple stacked representation of input spectra on the common grid.
-        self.trsp = np.vstack(flux)                    # shape: (nspec, nwave)
+
+    def _auto_continuum_band(self) -> Sequence[float]:
+        """Derive continuum windows for non-interactive use.
+
+        The routine samples the outer 5% of the wavelength coverage on both
+        sides of the line and returns two intervals suitable for the continuum
+        polynomial fit used in :meth:`Dopin`.
+        """
+
+        if not self.wave or not self.wave[0].size:
+            raise RuntimeError(
+                "Wavelength grid is empty. Run 'Foldspec' before calling 'Dopin'."
+            )
+
+        wave = np.asarray(self.wave[0], dtype=float)
+        if wave.size < 8:
+            raise ValueError("Cannot determine continuum bands from fewer than eight samples.")
+
+        window = max(3, int(round(0.05 * wave.size)))
+        left = wave[:window]
+        right = wave[-window:]
+
+        return (
+            float(left.min()),
+            float(left.max()),
+            float(right.min()),
+            float(right.max()),
+        )
 
 
     def Dopin(self,poly_degree=2, continnum_band=False,
@@ -218,7 +361,9 @@ class spruit:
               xlim=None,two_orbits=True,vel_space=True,
               verbose=False):
         """Normalises each spectrum to a user-defined continnum.
-            Optional, it plots a trail spectra
+            Optional, it plots a trail spectra. When ``self.interactive`` is
+            ``False`` and no continuum bands are supplied the routine selects
+            suitable regions automatically so it can run headlessly.
 
         Parameters
         ----------
@@ -256,15 +401,20 @@ class spruit:
         None.
 
         """
+        if not self.wave:
+            raise RuntimeError("No spectra loaded. Run 'Foldspec' before normalising.")
+
         lam=self.lam0
         cl=2.997e5
 
         cmaps = plt.cm.binary_r #cm.winter_r cm.Blues#cm.gist_stern
 
-        if lam < min(self.wave[0]) or lam > max(self.wave[0]):
-            print('Error: input wavelength out of bounds.')
-            print('Must be between '+str(min(self.wave[0]))+' and '+str(max(self.wave[0]))+'.')
-            sys.exit()
+        wmin = float(np.min(self.wave[0]))
+        wmax = float(np.max(self.wave[0]))
+        if lam < wmin or lam > wmax:
+            raise ValueError(
+                f"Input wavelength {lam} Å out of bounds. Must be between {wmin} and {wmax}."
+            )
         ss=0
         for i in np.arange(len(self.wave[0])-1):
             if lam >= self.wave[0][i]   and lam <= self.wave[0][i+1]:
@@ -277,22 +427,39 @@ class spruit:
         avgspec=np.sum(self.flux,axis=0)
         plt.plot(self.wave[0],avgspec/len(self.pha))
 
-        plt.draw()
         if not continnum_band:
-            print( 'Choose 4 points to define continuum')
-            xor=[]
-            for i in np.arange(4):
-                xx=plt.ginput(1,timeout=-1)
-                xor.append(xx[0][0])
-                plt.axvline(x=xx[0][0],linestyle='--',color='k')
-                plt.draw()
+            if self.interactive:
+                self._log(logging.INFO, "Choose 4 points to define the continuum.")
+                xor=[]
+                for _ in np.arange(4):
+                    selection=plt.ginput(1,timeout=-1)
+                    if not selection:
+                        raise RuntimeError("Continuum selection aborted by user.")
+                    xor.append(float(selection[0][0]))
+                    if self.plot:
+                        plt.axvline(x=xor[-1],linestyle='--',color='k')
+                        plt.draw()
+            else:
+                xor=list(self._auto_continuum_band())
+                message = (
+                    "Using automatic continuum bands at "
+                    f"[{xor[0]:.2f}, {xor[1]:.2f}] and [{xor[2]:.2f}, {xor[3]:.2f}] Å."
+                )
+                self._log(logging.INFO, message)
+                if self.plot:
+                    for idx,val in enumerate(xor):
+                        label='Cont Bands' if idx == 0 else ''
+                        plt.axvline(x=val,linestyle='--',color='k',label=label)
         else:
-            xor = continnum_band
-            lab1 = 'Cont Bands'
-            for i in np.arange(4):
-                if i != 0: lab1 = ''
-                plt.axvline(x=xor[i],linestyle='--',color='k',label=lab1)
-                plt.draw()
+            xor=[float(v) for v in continnum_band]
+            if len(xor) != 4:
+                raise ValueError("continnum_band must contain four wavelength limits.")
+            if xor[0] >= xor[1] or xor[2] >= xor[3]:
+                raise ValueError("Each continuum interval must be strictly increasing.")
+            if self.plot:
+                for idx,val in enumerate(xor):
+                    label='Cont Bands' if idx == 0 else ''
+                    plt.axvline(x=val,linestyle='--',color='k',label=label)
         lop = ((self.wave[0]>xor[0]) * (self.wave[0]<xor[1])) + ((self.wave[0]>xor[2]) * (self.wave[0]<xor[3]))
         yor=avgspec[lop]/len(self.pha)
         plt.ylim(avgspec[lop].min()/len(self.pha)*0.8,avgspec.max()/len(self.pha)*1.1)
@@ -321,7 +488,8 @@ class spruit:
                 np.max(avgspec[qq]/len(self.pha)-linfit[qq] -1.0)*1.1)
         plt.xlabel('Velocity km/s')
         plt.ylabel('Bkg subtracted Flux')
-        plt.draw()
+        if self.plot:
+            plt.draw()
         plt.tight_layout()
 
         ######## Do individual fit on the blaze
@@ -347,9 +515,10 @@ class spruit:
             self.normalised_flux[ct] = np.array(flu[lop]) - np.array(linfit)
             self.normalised_flux[ct] = np.interp(self.vell,vell_temp,self.normalised_flux[ct])
 
-        if self.verbose:
-            print(">> Max/Min velocities in map: {} / {}".format(self.vell.min(),
-                                                             self.vell.max()))
+        self._log(
+            logging.INFO,
+            f">> Max/Min velocities in map: {self.vell.min()} / {self.vell.max()}",
+        )
 
 
         ##  JVHS 2019 August 6
@@ -430,7 +599,7 @@ class spruit:
         else:
             dw = (self.normalised_wave[rr][1] - self.normalised_wave[rr][0]) *\
                                                  rebin_wave
-            print(dw , dw/rebin_wave)
+            self._log(logging.DEBUG, f"Rebin step {dw} ({dw/rebin_wave})")
             waver = np.arange(self.normalised_wave[rr][0],
                               self.normalised_wave[rr][-1],dw )
         """
@@ -490,7 +659,7 @@ class spruit:
                 plt.plot(waver,np.nanmedian(self.normalised_flux,axis=0)[rr],
                     label='Median',color='#8e44ad')
             else:
-                print(dw)
+                self._log(logging.DEBUG, str(dw))
                 new_med = np.interp(waver,wave[rr],
                                     np.nanmedian(self.normalised_flux,axis=0)[rr])
                 plt.plot(waver,np.nanmedian(self.normalised_flux,axis=0)[rr],
@@ -580,12 +749,12 @@ class spruit:
             nvpm=int(s[s.find('nvpm=')+len('nvpm='):s.rfind(',nvm')])
             nvm=int(s[s.find('nvm=')+len('nvm='):s.rfind(')')])
             nvp = self.vell.size
-            print('nvp',nvp)
+            self._log(logging.DEBUG, f"nvp {nvp}")
 
-            print(self.trsp.shape)
+            self._log(logging.DEBUG, f"Trail shape {self.trsp.shape}")
             nv0=int(self.overs*nvp)
             nv=max([nv0,int(min([1.5*nv0,npp/3.]))])
-            print('nv',nv,nv0)
+            self._log(logging.DEBUG, f"nv {nv} (nv0 {nv0})")
             if nv%2 == 1:
                 nv+=1
             #nv=120
@@ -594,11 +763,13 @@ class spruit:
             nt = (nvpm * npm) + (nv * nvpm * 3) + (2 * npm * nv)
             prmsize = (0.9 * nv * nt) + (0.9 * nv * nt)
 
-            print ('Estimated Memory required ',int(8*prmsize/1e6),' Mbytes')
-            #print nv,nvm,np,npm,nvp,nvpm
-            print("np={}; nvpm={}, nvm={}".format(npp, nvp, nv))
-            print('ND',nd)
-            print('NR',nr)
+            self._log(
+                logging.INFO,
+                f"Estimated memory required {int(8*prmsize/1e6)} Mbytes",
+            )
+            self._log(logging.DEBUG, f"np={npp}; nvpm={nvp}, nvm={nv}")
+            self._log(logging.DEBUG, f"ND {nd}")
+            self._log(logging.DEBUG, f"NR {nr}")
             if nv != nvm or npp != npm or nvp !=nvpm:
                 a1='      parameter (npm=%4d'% npp
                 a2=',nvpm=%4d'%nvp
@@ -618,9 +789,8 @@ class spruit:
                     else:
                         f.write(lino[:]+')')
                 f.close()
-            if self.verbose:
-                print ('>> Computing MEM tomogram <<')
-                print ('----------------------------')
+            self._log(logging.INFO, '>> Computing MEM tomogram <<')
+            self._log(logging.INFO, '----------------------------')
             #os.system('gfortran -O -o dopp_input.txt dop.in dop.f clock.f')
             os.system('make dop.out')
             os.system('./dopp dopp.out')
@@ -628,22 +798,23 @@ class spruit:
             lines=fo.readlines()
             fo.close()
             #print(clim,rr)
-            if self.verbose: print ('----------------------------')
+            self._log(logging.INFO, '----------------------------')
             if lines[-1].split()[0] == 'projection':
                 nri = float(lines[-1].split()[-1])/float(lines[-2].split()[-1])
                 ndi = float(lines[-1].split()[-2])/float(lines[-2].split()[-2])
-                print('>> PROJECTION MATRIX TOO SMALL <<')
-                print('>> Recomputing with values from Spruit:')
-                print('>> ndi = {}, nri = {}'.format(ndi,nri))
+                self._log(logging.WARNING, '>> PROJECTION MATRIX TOO SMALL <<')
+                self._log(logging.INFO, '>> Recomputing with values from Spruit:')
+                self._log(logging.INFO, f'>> ndi = {ndi}, nri = {nri}')
             else:
                 compile_flag=False
-        clim,rr=lines[-2].split()[-1],lines[-2].split()[-2]
+        clim = float(lines[-2].split()[-1])
+        rr = float(lines[-2].split()[-2])
         if rr > clim:
-            print ('>> NOT CONVERGED: Specified reduced chi^2 not reached: {} > {}'.format(rr,clim))
-            sys.exit()
+            message = f">> NOT CONVERGED: Specified reduced chi^2 not reached: {rr} > {clim}"
+            self._log(logging.ERROR, message)
+            raise RuntimeError(message)
         else:
-            if self.verbose:
-                print ('>> Succesful Dopmap!')
+            self._log(logging.INFO, '>> Succesful Dopmap!')
 
 
 
@@ -1582,18 +1753,17 @@ def make_segments(x, y):
     segments = np.concatenate([points[:-1], points[1:]], axis=1)
     return segments
 
-def test_data():
-    module_path = os.path.dirname(os.path.realpath(__file__))
-    print("-- Copying test data --")
-    os.system('cp -r '+module_path+'/test_data/* ./.')
+def test_data(
+    destination: Optional[Union[Path, str]] = None,
+    overwrite: bool = False,
+) -> List[Path]:
+    """Copy the bundled test data into *destination* (defaults to CWD)."""
 
+    dest_dir = Path.cwd() if destination is None else Path(destination)
+    copied = copy_test_data(dest_dir, overwrite=overwrite)
 
-import numpy as np
-import numpy.ma as ma
-
-import matplotlib.cbook as cbook
-from matplotlib.colors import Normalize
-
+    LOGGER.info("Copied %d test data files to %s", len(copied), dest_dir)
+    return copied
 
 class MyNormalize(Normalize):
     '''
