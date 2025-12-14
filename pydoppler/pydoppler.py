@@ -3,18 +3,12 @@
 from __future__ import annotations
 
 import logging
-import os
 import shutil
+import subprocess
 from pathlib import Path
 from typing import List, Optional, Sequence, Union
 
-import matplotlib.cm as cm
-import matplotlib.collections as mcoll
-import matplotlib.cbook as cbook
-import matplotlib.pyplot as plt
 import numpy as np
-import numpy.ma as ma
-from matplotlib.colors import Normalize
 
 try:  # Python 3.9+
     from importlib.resources import files as resource_files
@@ -22,11 +16,31 @@ except ImportError:  # pragma: no cover - Python <3.9 fallback
     from importlib_resources import files as resource_files  # type: ignore
 
 
-plt.rcParams.update({'font.size': 12})
-
-
 LOGGER = logging.getLogger(__name__)
 LOGGER.addHandler(logging.NullHandler())
+
+
+_MATPLOTLIB_CONFIGURED = False
+
+
+def _lazy_import_matplotlib_pyplot():
+    """Import Matplotlib lazily so importing :mod:`pydoppler` stays headless-safe."""
+
+    global _MATPLOTLIB_CONFIGURED
+    try:
+        import matplotlib as mpl
+        import matplotlib.pyplot as plt
+    except Exception as exc:  # pragma: no cover - depends on local environment
+        raise ImportError(
+            "Matplotlib is required for plotting functionality. "
+            "Install it with `pip install matplotlib`."
+        ) from exc
+
+    if not _MATPLOTLIB_CONFIGURED:
+        mpl.rcParams.update({"font.size": 12})
+        _MATPLOTLIB_CONFIGURED = True
+
+    return mpl, plt
 
 
 def _copy_tree(source, destination: Path, overwrite: bool = False) -> List[Path]:
@@ -404,6 +418,8 @@ class spruit:
         if not self.wave:
             raise RuntimeError("No spectra loaded. Run 'Foldspec' before normalising.")
 
+        _, plt = _lazy_import_matplotlib_pyplot()
+
         lam=self.lam0
         cl=2.997e5
 
@@ -708,56 +724,91 @@ class spruit:
 
     def Syncdop(self,nri=0.9,ndi=0.7):
         '''
-        Runs the fortran code dopp, using the output files from dopin
-        Parameters
-        ----------
-        None
+        Runs the fortran code dopp, using the output files from dopin.
 
-        Returns
-        -------
-        None.
+        This routine requires the Fortran sources (``dop.f``, ``emap_ori.par``,
+        and ``makefile``) to be present in the current working directory and
+        relies on external tooling (``make`` and ``gfortran``).
         '''
+        work_dir = Path.cwd()
+        required_files = ("dopin", "emap_ori.par", "dop.f", "makefile")
+        for filename in required_files:
+            if not (work_dir / filename).is_file():
+                raise FileNotFoundError(
+                    f"Required file '{filename}' not found in {work_dir}. "
+                    "Run 'Dopin()' first to generate 'dopin' and ensure the bundled "
+                    "Fortran sources are installed (e.g. `pydoppler.copy_fortran_code(Path.cwd())`)."
+                )
+
+        if shutil.which("make") is None:
+            raise RuntimeError(
+                "The `make` executable was not found on PATH. Install make (e.g. Xcode Command Line Tools on macOS)."
+            )
+        if shutil.which("gfortran") is None:
+            raise RuntimeError(
+                "The `gfortran` executable was not found on PATH. Install gfortran and ensure it is available as `gfortran`."
+            )
+
         compile_flag = True
-        while compile_flag == True:
-            f=open('dop.in','w')
-            f.write("{}     ih       type of likelihood function (ih=1 for chi-squared)\n".format(self.ih))
-            f.write("{}     iw       iw=1 if error bars are to be read and used\n".format(self.iw))
-            f.write("{}  {}    pb0,pb1    range of phases to be ignored\n".format(self.pb0,self.pb1))
-            f.write("{}     ns       smearing width in default map\n".format(self.ns))
-            f.write("{:.1e}     ac       accuracy of convergence\n".format(self.ac))
-            f.write("{}     nim      max no of iterations\n".format(self.nim))
-            f.write("{} {}  {}        al0,alf,nal   starting value, factor, max number of alfas\n".format(self.al0,self.alf,self.nal))
-            f.write("{}     clim     'C-aim'\n".format(self.clim))
-            f.write("{}     ipri     printout control for standard output channel (ipr=2 for full)\n".format(self.ipri))
-            f.write("{}     norm     norm=1 for normalization to flat light curve\n".format(self.norm))
-            f.write("{:2.1e}   {}  wid,af    width and amplitude central absorption fudge\n".format(self.wid,self.af))
-            f.write("end of parameter input file")
-            f.close()
+        dop_log_lines: List[str] = []
+        while compile_flag:
+            with open("dop.in", "w", encoding="utf-8") as f:
+                f.write(
+                    f"{self.ih}     ih       type of likelihood function (ih=1 for chi-squared)\n"
+                )
+                f.write(
+                    f"{self.iw}     iw       iw=1 if error bars are to be read and used\n"
+                )
+                f.write(
+                    f"{self.pb0}  {self.pb1}    pb0,pb1    range of phases to be ignored\n"
+                )
+                f.write(f"{self.ns}     ns       smearing width in default map\n")
+                f.write(f"{self.ac:.1e}     ac       accuracy of convergence\n")
+                f.write(f"{self.nim}     nim      max no of iterations\n")
+                f.write(
+                    f"{self.al0} {self.alf}  {self.nal}        al0,alf,nal   starting value, factor, max number of alfas\n"
+                )
+                f.write(f"{self.clim}     clim     'C-aim'\n")
+                f.write(
+                    f"{self.ipri}     ipri     printout control for standard output channel (ipr=2 for full)\n"
+                )
+                f.write(
+                    f"{self.norm}     norm     norm=1 for normalization to flat light curve\n"
+                )
+                f.write(
+                    f"{self.wid:2.1e}   {self.af}  wid,af    width and amplitude central absorption fudge\n"
+                )
+                f.write("end of parameter input file")
 
-            f=open('dopin')
-            lines=f.readlines()
-            f.close()
-            # np == npp
-            npp,nvp=int(lines[0].split()[0]),int(lines[0].split()[1])
-            lines=[]
+            with open("dopin", encoding="utf-8") as f:
+                dopin_lines = [line.strip() for line in f if line.strip()]
+            if not dopin_lines:
+                raise RuntimeError("The 'dopin' file is empty. Run 'Dopin()' again.")
 
-            f=open('emap_ori.par')
-            lines=f.readlines()
-            f.close()
-            s=lines[0]
-            npm=int(s[s.find('npm=')+len('npm='):s.rfind(',nvpm')])
-            nvpm=int(s[s.find('nvpm=')+len('nvpm='):s.rfind(',nvm')])
-            nvm=int(s[s.find('nvm=')+len('nvm='):s.rfind(')')])
+            try:
+                npp, _ = int(dopin_lines[0].split()[0]), int(dopin_lines[0].split()[1])
+            except (IndexError, ValueError) as exc:
+                raise RuntimeError("Failed to parse the header line of 'dopin'.") from exc
+
+            with open("emap_ori.par", encoding="utf-8") as f:
+                emap_lines = f.readlines()
+            if not emap_lines:
+                raise RuntimeError("'emap_ori.par' is empty.")
+
+            s = emap_lines[0]
+            npm = int(s[s.find("npm=") + len("npm=") : s.rfind(",nvpm")])
+            nvpm = int(s[s.find("nvpm=") + len("nvpm=") : s.rfind(",nvm")])
+            nvm = int(s[s.find("nvm=") + len("nvm=") : s.rfind(")")])
             nvp = self.vell.size
             self._log(logging.DEBUG, f"nvp {nvp}")
 
             self._log(logging.DEBUG, f"Trail shape {self.trsp.shape}")
-            nv0=int(self.overs*nvp)
-            nv=max([nv0,int(min([1.5*nv0,npp/3.]))])
+            nv0 = int(self.overs * nvp)
+            nv = max([nv0, int(min([1.5 * nv0, npp / 3.0]))])
             self._log(logging.DEBUG, f"nv {nv} (nv0 {nv0})")
-            if nv%2 == 1:
-                nv+=1
-            #nv=120
+            if nv % 2 == 1:
+                nv += 1
+
             nd = npm * nvpm
             nr = 0.8 * nv * nv
             nt = (nvpm * npm) + (nv * nvpm * 3) + (2 * npm * nv)
@@ -770,57 +821,102 @@ class spruit:
             self._log(logging.DEBUG, f"np={npp}; nvpm={nvp}, nvm={nv}")
             self._log(logging.DEBUG, f"ND {nd}")
             self._log(logging.DEBUG, f"NR {nr}")
-            if nv != nvm or npp != npm or nvp !=nvpm:
-                a1='      parameter (npm=%4d'% npp
-                a2=',nvpm=%4d'%nvp
-                a3=',nvm=%4d)'%nv
-                a1=a1+a2+a3
 
-                f=open('emap.par','w')
-                f.write(a1+'\n')
-                for i,lino in enumerate(lines[1:]):
-                    #print(lino)
-                    if i == 2:
-                        tempo_str = '      parameter (nri={:.3f}*nvm*nt/nd,ndi={:.3f}*nvm*nt/nr)\n'.format(nri,ndi)
-                        #aprint(tempo_str)
-                        f.write(tempo_str)
-                    elif lino !=3:
-                        f.write(lino[:])
-                    else:
-                        f.write(lino[:]+')')
-                f.close()
+            if nv != nvm or npp != npm or nvp != nvpm:
+                header = f"      parameter (npm={npp:4d},nvpm={nvp:4d},nvm={nv:4d})"
+                with open("emap.par", "w", encoding="utf-8") as f:
+                    f.write(header + "\n")
+                    for i, line in enumerate(emap_lines[1:]):
+                        if i == 2:
+                            f.write(
+                                (
+                                    "      parameter (nri={:.3f}*nvm*nt/nd,ndi={:.3f}*nvm*nt/nr)\n"
+                                ).format(nri, ndi)
+                            )
+                        else:
+                            f.write(line)
+
             self._log(logging.INFO, '>> Computing MEM tomogram <<')
             self._log(logging.INFO, '----------------------------')
-            #os.system('gfortran -O -o dopp_input.txt dop.in dop.f clock.f')
-            os.system('make dop.out')
-            os.system('./dopp dopp.out')
-            fo=open('dop.log')
-            lines=fo.readlines()
-            fo.close()
-            #print(clim,rr)
+            try:
+                result = subprocess.run(
+                    ["make", "dop.out"],
+                    cwd=work_dir,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+            except subprocess.CalledProcessError as exc:
+                output = (exc.stdout or "") + (exc.stderr or "")
+                raise RuntimeError(
+                    "Failed to build/run the Fortran tomography code via `make dop.out`.\n"
+                    + output
+                ) from exc
+
+            if result.stdout:
+                self._log(logging.DEBUG, result.stdout.rstrip())
+            if result.stderr:
+                self._log(logging.DEBUG, result.stderr.rstrip())
+
+            try:
+                with open("dop.log", encoding="utf-8") as fo:
+                    dop_log_lines = [line.strip() for line in fo if line.strip()]
+            except FileNotFoundError as exc:
+                raise FileNotFoundError(
+                    f"Expected '{work_dir / 'dop.log'}' to be produced by `make dop.out`, but it was not found."
+                ) from exc
+
             self._log(logging.INFO, '----------------------------')
-            if lines[-1].split()[0] == 'projection':
-                nri = float(lines[-1].split()[-1])/float(lines[-2].split()[-1])
-                ndi = float(lines[-1].split()[-2])/float(lines[-2].split()[-2])
+            if not dop_log_lines:
+                raise RuntimeError("'dop.log' is empty; the Fortran code may have failed.")
+
+            last_tokens = dop_log_lines[-1].split()
+            if last_tokens and last_tokens[0] == "projection":
+                if len(dop_log_lines) < 2:
+                    raise RuntimeError("Cannot parse 'dop.log': missing summary line before 'projection'.")
+                prev_tokens = dop_log_lines[-2].split()
+                try:
+                    nri = float(last_tokens[-1]) / float(prev_tokens[-1])
+                    ndi = float(last_tokens[-2]) / float(prev_tokens[-2])
+                except (IndexError, ValueError) as exc:
+                    raise RuntimeError("Failed to parse projection matrix scaling from 'dop.log'.") from exc
+
                 self._log(logging.WARNING, '>> PROJECTION MATRIX TOO SMALL <<')
                 self._log(logging.INFO, '>> Recomputing with values from Spruit:')
                 self._log(logging.INFO, f'>> ndi = {ndi}, nri = {nri}')
             else:
-                compile_flag=False
-        clim = float(lines[-2].split()[-1])
-        rr = float(lines[-2].split()[-2])
+                compile_flag = False
+
+        if len(dop_log_lines) < 2:
+            raise RuntimeError("Cannot parse convergence metrics from 'dop.log'.")
+        summary_tokens = dop_log_lines[-2].split()
+        try:
+            clim = float(summary_tokens[-1])
+            rr = float(summary_tokens[-2])
+        except (IndexError, ValueError) as exc:
+            raise RuntimeError("Failed to parse convergence metrics from 'dop.log'.") from exc
+
         if rr > clim:
             message = f">> NOT CONVERGED: Specified reduced chi^2 not reached: {rr} > {clim}"
             self._log(logging.ERROR, message)
             raise RuntimeError(message)
-        else:
-            self._log(logging.INFO, '>> Succesful Dopmap!')
+
+        self._log(logging.INFO, '>> Succesful Dopmap!')
 
 
 
-    def Dopmap(self,dopout = 'dop.out',cmaps = cm.Greys_r,
-               limits=None, colorbar=False, negative=False,remove_mean=False,
-               corrx=0,corry=0, smooth=False):
+    def Dopmap(
+        self,
+        dopout: str = "dop.out",
+        cmaps=None,
+        limits=None,
+        colorbar: bool = False,
+        negative: bool = False,
+        remove_mean: bool = False,
+        corrx=0,
+        corry=0,
+        smooth: bool = False,
+    ):
         """
         Read output files from Henk Spruit's *.out and plot a Doppler map
 
@@ -829,9 +925,9 @@ class spruit:
         dopout : str, Optional
             Name of output file to be read. Default, dop.out
 
-        cmaps : cmap function,
+        cmaps : matplotlib colormap, optional
             Color scheme to use for Doppler map
-            - Default, cm.Greys_r
+            - Default, matplotlib.cm.Greys_r
 
         limits : array,
             Normalised limtis e.g. [.8,1.1] for colour display. if None,
@@ -863,6 +959,10 @@ class spruit:
             Data cube from Doppler map
 
         """
+        _, plt = _lazy_import_matplotlib_pyplot()
+        if cmaps is None:
+            cmaps = plt.cm.Greys_r
+
         if self.verbose:
             print(">> Reading {} file".format(dopout))
         fro=open(dopout,'r')
@@ -985,6 +1085,8 @@ class spruit:
         plt.tight_layout()
         plt.show()
         if colorbar:
+            from .mynormalize import MyNormalize
+
             cbar = plt.colorbar(format='%.1f',orientation='vertical',
                                 fraction=0.046, pad=0.04)
             cbar.set_label('Normalised Flux')
@@ -1012,15 +1114,15 @@ class spruit:
         return cbar,new_data
 
 
-    def Reco(self, cmaps=plt.cm.binary, limits=None, colorbar=True):
+    def Reco(self, cmaps=None, limits=None, colorbar=True):
         """
         Plot original and reconstructed trail spectra from Henk Spruit's *.out
 
         Parameters
         ----------
-        cmaps : cmap function,
-            Color scheme to use for Doppler map
-            - Default, cm.Greys_r
+        cmaps : matplotlib colormap, optional
+            Color scheme to use for the trail spectra images.
+            - Default, matplotlib.cm.binary
 
         limits : array,
             Normalised limtis e.g. [.8,1.1] for colour display. if None,
@@ -1040,6 +1142,12 @@ class spruit:
             Data cube from reconstructed spectra
 
         """
+        _, plt = _lazy_import_matplotlib_pyplot()
+        if cmaps is None:
+            cmaps = plt.cm.binary
+        if colorbar:
+            from .mynormalize import MyNormalize
+
         fro=open('dop.out','r')
         lines=fro.readlines()
         fro.close()
@@ -1231,6 +1339,7 @@ def rebin_trail(waver, flux, input_phase, nbins, delp, rebin_wave=None):
 
 class DraggableColorbar(object):
     def __init__(self, cbar, mappable):
+        _, plt = _lazy_import_matplotlib_pyplot()
         self.cbar = cbar
         self.mappable = mappable
         self.press = None
@@ -1334,6 +1443,7 @@ def stream(q,k1,porb,m1,inc,colors='k',both_lobes=False,title=True,label=None):
     system under Roche lobe geometry. This will be plotted directly in the
     Doppler tomogram
     """
+    _, plt = _lazy_import_matplotlib_pyplot()
     xl,yl,xi,yi,wout,wkout = stream_calculate(q,ni = 100,nj = 100)
 
     #print''
@@ -1396,7 +1506,7 @@ def stream(q,k1,porb,m1,inc,colors='k',both_lobes=False,title=True,label=None):
     plt.plot(vx[:],vy[:],color=colors,marker='')
     plt.plot(vkx[:],vky[:],color=colors,marker='')
     plt.plot(yl[int(yl.size/4):3*int(yl.size/4)],xl[int(xl.size/4):3*int(xl.size/4)],color=colors)
-    if title: plt.title(r'$i$='+str(inc/np.pi*180.)[:5]+', M$_1$='+str(m1)+' M$_{\odot}$, $q$='+str(q)+', P$_{orb}$='+str(porb/3600.)[:4]+' hr')
+    if title: plt.title(r'$i$='+str(inc/np.pi*180.)[:5]+', M$_1$='+str(m1)+r' M$_{\odot}$, $q$='+str(q)+', P$_{orb}$='+str(porb/3600.)[:4]+' hr')
     ## 0,0 systemic velocity, km/s
     vy1 = cm * vs * si
     plt.plot(0.,0.,'x',ms = 9,c = colors,alpha=0.3)
@@ -1411,7 +1521,9 @@ def stream(q,k1,porb,m1,inc,colors='k',both_lobes=False,title=True,label=None):
     else:
         plt.plot(yl[int(yl.size/4):3*int(yl.size/4)],xl[int(xl.size/4):3*int(xl.size/4)],color=colors)
 
-    if label != None: plt.text(0.12, 0.1,label, ha='center', va='center', transform=ax.transAxes)
+    if label is not None:
+        ax = plt.gca()
+        plt.text(0.12, 0.1, label, ha="center", va="center", transform=ax.transAxes)
     plt.tight_layout()
 
 def stream_calculate(qm,ni = 100,nj = 100):
@@ -1684,6 +1796,7 @@ def resonance(j,k,k1,q,porb,m1):
     notation of Whitehurst & King (19XX). Eq. taken from Warner 1995
     page 206-207.
     '''
+    _, plt = _lazy_import_matplotlib_pyplot()
     k1 *= 1e5
     porb *= 24. * 3600.
     a_1 = k1 / q / (2.0*np.pi) * porb
@@ -1712,8 +1825,8 @@ def resonance(j,k,k1,q,porb,m1):
 
 
 def colorline(
-    x, y, z=None, cmap=plt.get_cmap('copper'), norm=plt.Normalize(0.0, 1.0),
-        linewidth=3, alpha=1.0):
+    x, y, z=None, cmap=None, norm=None, linewidth=3, alpha=1.0
+):
     """
     http://nbviewer.ipythonp.org/github/dpsanders/matplotlib-examples/blob/master/colorline.ipynb
     http://matplotlib.org/examples/pylab_examples/multicolored_line.html
@@ -1721,6 +1834,15 @@ def colorline(
     Optionally specify colors in the array z
     Optionally specify a colormap, a norm function and a line width
     """
+
+    _, plt = _lazy_import_matplotlib_pyplot()
+    from matplotlib.collections import LineCollection
+    from matplotlib.colors import Normalize
+
+    if cmap is None:
+        cmap = plt.get_cmap("copper")
+    if norm is None:
+        norm = Normalize(0.0, 1.0)
 
     # Default colors equally spaced on [0,1]:
     if z is None:
@@ -1733,8 +1855,8 @@ def colorline(
     z = np.asarray(z)
 
     segments = make_segments(x, y)
-    lc = mcoll.LineCollection(segments, array=z, cmap=cmap, norm=norm,
-                              linewidth=linewidth, alpha=alpha)
+    lc = LineCollection(segments, array=z, cmap=cmap, norm=norm,
+                        linewidth=linewidth, alpha=alpha)
 
     ax = plt.gca()
     ax.add_collection(lc)
@@ -1764,189 +1886,4 @@ def test_data(
 
     LOGGER.info("Copied %d test data files to %s", len(copied), dest_dir)
     return copied
-
-class MyNormalize(Normalize):
-    '''
-    # The Normalize class is largely based on code provided by Sarah Graves.
-    A Normalize class for imshow that allows different stretching functions
-    for astronomical images.
-    '''
-
-    def __init__(self, stretch='linear', exponent=5, vmid=None, vmin=None,
-                 vmax=None, clip=False):
-        '''
-        Initalize an APLpyNormalize instance.
-
-        Optional Keyword Arguments:
-
-            *vmin*: [ None | float ]
-                Minimum pixel value to use for the scaling.
-
-            *vmax*: [ None | float ]
-                Maximum pixel value to use for the scaling.
-
-            *stretch*: [ 'linear' | 'log' | 'sqrt' | 'arcsinh' | 'power' ]
-                The stretch function to use (default is 'linear').
-
-            *vmid*: [ None | float ]
-                Mid-pixel value used for the log and arcsinh stretches. If
-                set to None, a default value is picked.
-
-            *exponent*: [ float ]
-                if self.stretch is set to 'power', this is the exponent to use.
-
-            *clip*: [ True | False ]
-                If clip is True and the given value falls outside the range,
-                the returned value will be 0 or 1, whichever is closer.
-        '''
-
-        if vmax < vmin:
-            raise Exception("vmax should be larger than vmin")
-
-        # Call original initalization routine
-        Normalize.__init__(self, vmin=vmin, vmax=vmax, clip=clip)
-
-        # Save parameters
-        self.stretch = stretch
-        self.exponent = exponent
-
-        if stretch == 'power' and np.equal(self.exponent, None):
-            raise Exception("For stretch=='power', an exponent should be specified")
-
-        if np.equal(vmid, None):
-            if stretch == 'log':
-                if vmin > 0:
-                    self.midpoint = vmax / vmin
-                else:
-                    raise Exception("When using a log stretch, if vmin < 0, then vmid has to be specified")
-            elif stretch == 'arcsinh':
-                self.midpoint = -1. / 30.
-            else:
-                self.midpoint = None
-        else:
-            if stretch == 'log':
-                if vmin < vmid:
-                    raise Exception("When using a log stretch, vmin should be larger than vmid")
-                self.midpoint = (vmax - vmid) / (vmin - vmid)
-            elif stretch == 'arcsinh':
-                self.midpoint = (vmid - vmin) / (vmax - vmin)
-            else:
-                self.midpoint = None
-
-    def __call__(self, value, clip=None):
-
-        #read in parameters
-        method = self.stretch
-        exponent = self.exponent
-        midpoint = self.midpoint
-
-        # ORIGINAL MATPLOTLIB CODE
-
-        if clip is None:
-            clip = self.clip
-
-        if cbook.iterable(value):
-            vtype = 'array'
-            val = ma.asarray(value).astype(float)
-        else:
-            vtype = 'scalar'
-            val = ma.array([value]).astype(float)
-
-        self.autoscale_None(val)
-        vmin, vmax = self.vmin, self.vmax
-        if vmin > vmax:
-            raise ValueError("minvalue must be less than or equal to maxvalue")
-        elif vmin == vmax:
-            return 0.0 * val
-        else:
-            if clip:
-                mask = ma.getmask(val)
-                val = ma.array(np.clip(val.filled(vmax), vmin, vmax),
-                                mask=mask)
-            result = (val - vmin) * (1.0 / (vmax - vmin))
-
-            # CUSTOM APLPY CODE
-
-            # Keep track of negative values
-            negative = result < 0.
-
-            if self.stretch == 'linear':
-
-                pass
-
-            elif self.stretch == 'log':
-
-                result = ma.log10(result * (self.midpoint - 1.) + 1.) \
-                       / ma.log10(self.midpoint)
-
-            elif self.stretch == 'sqrt':
-
-                result = ma.sqrt(result)
-
-            elif self.stretch == 'arcsinh':
-
-                result = ma.arcsinh(result / self.midpoint) \
-                       / ma.arcsinh(1. / self.midpoint)
-
-            elif self.stretch == 'power':
-
-                result = ma.power(result, exponent)
-
-            else:
-
-                raise Exception("Unknown stretch in APLpyNormalize: %s" %
-                                self.stretch)
-
-            # Now set previously negative values to 0, as these are
-            # different from true NaN values in the FITS image
-            result[negative] = -np.inf
-
-        if vtype == 'scalar':
-            result = result[0]
-
-        return result
-
-    def inverse(self, value):
-
-        # ORIGINAL MATPLOTLIB CODE
-
-        if not self.scaled():
-            raise ValueError("Not invertible until scaled")
-
-        vmin, vmax = self.vmin, self.vmax
-
-        # CUSTOM APLPY CODE
-
-        if cbook.iterable(value):
-            val = ma.asarray(value)
-        else:
-            val = value
-
-        if self.stretch == 'linear':
-
-            pass
-
-        elif self.stretch == 'log':
-
-            val = (ma.power(10., val * ma.log10(self.midpoint)) - 1.) / (self.midpoint - 1.)
-
-        elif self.stretch == 'sqrt':
-
-            val = val * val
-
-        elif self.stretch == 'arcsinh':
-
-            val = self.midpoint * \
-                  ma.sinh(val * ma.arcsinh(1. / self.midpoint))
-
-        elif self.stretch == 'power':
-
-            val = ma.power(val, (1. / self.exponent))
-
-        else:
-
-            raise Exception("Unknown stretch in APLpyNormalize: %s" %
-                            self.stretch)
-
-        return vmin + val * (vmax - vmin)
 

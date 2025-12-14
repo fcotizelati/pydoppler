@@ -31,7 +31,7 @@
   At the moment, only gfortran is supported.
 
 
-  Python >3.0 version is required (No tests have been done for backwards compatibility with python 2.X).
+  Python >=3.8 is required.
 
   You can download and install PyDoppler via pip. In a terminal command line, just type:
 

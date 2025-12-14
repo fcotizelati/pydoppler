@@ -41,8 +41,8 @@ class MyNormalize(Normalize):
                 the returned value will be 0 or 1, whichever is closer.
         '''
 
-        if vmax < vmin:
-            raise Exception("vmax should be larger than vmin")
+        if vmin is not None and vmax is not None and vmax < vmin:
+            raise ValueError("vmax should be larger than vmin")
 
         # Call original initalization routine
         Normalize.__init__(self, vmin=vmin, vmax=vmax, clip=clip)
@@ -51,23 +51,33 @@ class MyNormalize(Normalize):
         self.stretch = stretch
         self.exponent = exponent
 
-        if stretch == 'power' and np.equal(self.exponent, None):
-            raise Exception("For stretch=='power', an exponent should be specified")
+        if stretch == 'power' and self.exponent is None:
+            raise ValueError("For stretch=='power', an exponent should be specified")
 
-        if np.equal(vmid, None):
+        if vmid is None:
             if stretch == 'log':
+                if vmin is None or vmax is None:
+                    raise ValueError(
+                        "vmin and vmax must be set for stretch='log' unless vmid is provided"
+                    )
                 if vmin > 0:
                     self.midpoint = vmax / vmin
                 else:
-                    raise Exception("When using a log stretch, if vmin < 0, then vmid has to be specified")
+                    raise ValueError(
+                        "When using a log stretch, vmin must be > 0 (or specify vmid)"
+                    )
             elif stretch == 'arcsinh':
                 self.midpoint = -1. / 30.
             else:
                 self.midpoint = None
         else:
             if stretch == 'log':
+                if vmin is None or vmax is None:
+                    raise ValueError("vmin and vmax must be set for stretch='log'")
                 if vmin < vmid:
-                    raise Exception("When using a log stretch, vmin should be larger than vmid")
+                    raise ValueError(
+                        "When using a log stretch, vmin should be larger than vmid"
+                    )
                 self.midpoint = (vmax - vmid) / (vmin - vmid)
             elif stretch == 'arcsinh':
                 self.midpoint = (vmid - vmin) / (vmax - vmin)
