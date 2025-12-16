@@ -1075,9 +1075,19 @@ class spruit:
                 )
             except subprocess.CalledProcessError as exc:
                 output = (exc.stdout or "") + (exc.stderr or "")
+                hint = ""
+                if ("dopp: No such file or directory" in output or "dopp: not found" in output) and (
+                    work_dir / "dopp"
+                ).exists():
+                    hint = (
+                        "\n\nHint: the bundled Fortran makefile must execute the local binary as `./dopp` "
+                        "(some shells do not include the current directory in PATH). "
+                        "Re-copy the Fortran assets with overwrite enabled or edit the makefile in the workdir."
+                    )
                 raise RuntimeError(
                     "Failed to build/run the Fortran tomography code via `make dop.out`.\n"
                     + output
+                    + hint
                 ) from exc
 
             if result.stdout:
