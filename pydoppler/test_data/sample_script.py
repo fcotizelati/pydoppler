@@ -1,14 +1,26 @@
-import pydoppler
-import matplotlib.pyplot as plt
-import numpy as np
+import os
 from pathlib import Path
+
+import pydoppler
+import numpy as np
+
+# Set to True to save figures and run without GUI windows.
+SAVE_PNGS = True
+# Set to True to display figures interactively at the end.
+SHOW_PLOTS = False
+
+# Fortran execution + outputs are isolated in this directory.
+workdir = Path.cwd() / "pydoppler-workdir"
+if SAVE_PNGS and not SHOW_PLOTS:
+    os.environ.setdefault("MPLBACKEND", "Agg")
+    os.environ.setdefault("MPLCONFIGDIR", str(workdir / ".mplconfig"))
+
+import matplotlib.pyplot as plt
 # Import sample data
 # <<< COMMENT OUT IF YOU DONT NEED THE TEST DATASET >>>
 pydoppler.test_data()
 
-# Fortran execution + outputs are isolated in this directory.
-workdir = Path.cwd() / "pydoppler-workdir"
-pydoppler.copy_fortran_code(workdir)
+pydoppler.copy_fortran_code(workdir, overwrite=True)
 
 # Load base object for tomography
 dop = pydoppler.spruit(workdir=workdir)
@@ -29,7 +41,7 @@ dop.Foldspec()
 
 # Normalise the spectra
 dop.Dopin(continuum_band=[6500,6537,6591,6620],
-        plot_median=False,poly_degree=2)
+        plot_median=False,poly_degree=2, show=False)
 
 # Perform tomography
 dop.Syncdop()
@@ -37,7 +49,7 @@ dop.Syncdop()
 # This routine will display the outcome of the Doppler tomography.
 # You can overplot contours and streams.
 cb,data = dop.Dopmap(limits=[0.05,0.99],colorbar=False,cmaps=plt.cm.magma_r,
-                     smooth=False,remove_mean=False)
+                     smooth=False,remove_mean=False,show=False)
 
 # Overplot the donor contours, keplerian and ballistic streams
 qm=0.35
@@ -51,6 +63,28 @@ pydoppler.stream(qm,k1,porb,m1,inc)
 # Always check that reconstructed spectra looks like the original one. A good
 # rule of thumb "If a feature on the Doppler tomogram isn not in the trail,
 # most likely its not real!"
-cb2,cb3,dmr,dm = dop.Reco(colorbar=False,limits=[.05,0.95],cmaps=plt.cm.magma_r)
+cb2,cb3,dmr,dm = dop.Reco(colorbar=False,limits=[.05,0.95],cmaps=plt.cm.magma_r, show=False)
 
-dop.Residuals(dm=dm, dmr=dmr)
+dop.Residuals(dm=dm, dmr=dmr, show=False)
+
+if SAVE_PNGS:
+    outdir = workdir / "output_images"
+    outdir.mkdir(parents=True, exist_ok=True)
+    figures = {
+        "Average Spec": "Average_Spec.png",
+        "Trail": "Trail.png",
+        "Doppler Map": "Doppler_Map.png",
+        "Reconstruction": "Reconstruction.png",
+        "Residuals": "Residuals.png",
+    }
+    existing = set(plt.get_figlabels())
+    for label, filename in figures.items():
+        if label not in existing:
+            continue
+        fig = plt.figure(label)
+        fig.savefig(outdir / filename, dpi=200, bbox_inches="tight")
+
+if SHOW_PLOTS:
+    plt.show()
+else:
+    plt.close("all")
