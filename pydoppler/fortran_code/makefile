@@ -24,11 +24,11 @@
 compile=cp -f cclock.f clock.f ; gfortran -O -w -fallow-argument-mismatch 
 
 dop.out: dopin dop.in dopp
-	dopp
+	./dopp
 dopp: dop.f emap.par
 	$(compile) -o dopp dop.f clock.f
 
 lobe.out: lobe lobe.in
-	lobe
+	./lobe
 lobe: lobe.f
 	$(compile) -o lobe lobe.f
