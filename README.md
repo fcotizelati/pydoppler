@@ -66,17 +66,20 @@
   ```python
   from pathlib import Path
 
+  import matplotlib.pyplot as plt
   import pydoppler
 
-  # Copy bundled resources without shelling out to ``cp``
-  pydoppler.copy_fortran_code(Path.cwd())
-  script_path = pydoppler.install_sample_script(Path.cwd())
+  # Keep Fortran build products + outputs isolated
+  workdir = Path.cwd() / "pydoppler-workdir"
+  pydoppler.copy_fortran_code(workdir)
 
-  dop = pydoppler.spruit(interactive=False)
+  dop = pydoppler.spruit(workdir=workdir, interactive=False)
   dop.base_dir = "ugem99"
   dop.list = "ugem0all.fas"
   dop.Foldspec()
-  dop.Dopin()  # continuum bands are estimated automatically when non-interactive
+  dop.Dopin(plot=False)  # continuum bands are estimated automatically
+  dop.Syncdop()
+  _, dopmap = dop.Dopmap(plot=False)
   ```
 
   When ``interactive`` is disabled, the continuum bands are determined automatically so the
@@ -99,8 +102,9 @@
 
   ```
   This will create a subdirectory (called ugem99) in your current working directory
-  which will contain text files for each spectra (txtugem40*). The format of
-  each spectrum file is two columns: _Wavelength_ and _Flux_.
+  which will contain text files for each spectra (txhugem40*). The format of
+  each spectrum file is two columns: _Wavelength_ and _Flux_ (an optional third
+  column can provide 1σ flux uncertainties).
   * Wavelength is assumed to be in Angstrom.
   * Don't use headers in the files or us a _#_ at the start of the line, so it
   will be ignored.
@@ -108,10 +112,10 @@
   In addition, a phase file (ugem0all.fas) will be added inside the ugem99
   directory which contains the name
   of each spectrum file and its corresponding orbital phase.
-  This is a two column file with the following format:
+  This is a two- or three-column file with the following format:
 ```
-  txtugem4004 0.7150
-  txtugem4005 0.7794
+  txhugem4004 0.7150
+  txhugem4005 0.7794
          .
          .
          .
@@ -120,8 +124,8 @@
   ###  Section 2.2: Load your data
   I recommend to stick to the previous file format (as in the test dataset):
 
-  * Individual spectra. Two-column files, _space separated_: Wavelength  Flux
-  * Phase file. Two-column file, _space separated_: Spectrum_name  Orbital_Phase
+  * Individual spectra. Two- or three-column files, _space separated_: Wavelength  Flux  [Flux_Error]
+  * Phase file. Two- or three-column file, _space separated_: Spectrum_name  Orbital_Phase  [Delta_Phase]
 
   and the following directory tree in order for PyDoppler to work properly:
 
@@ -140,18 +144,21 @@
   Before running any routines, verify that you have added all the relevant
   parameters into the PyDoppler object.
 
-  * _NOTE:_ The ``pydoppler.spruit()`` constructor can copy the bundled Fortran
-  sources and provide a sample script (``sample_script.py``) with all the commands in the
-  following tutorial. The code will add a new script (e.g. ``sample_script-1.py``)
-  if you use the ``force_install=True`` keyword, it will not overwrite the one
-  found in the directory. Set ``auto_install=False`` if you prefer to manage the
-  resources manually.
+  * _NOTE:_ PyDoppler runs the Fortran code inside ``dop.workdir`` (defaults to
+  ``./pydoppler-workdir``) and writes ``dopin``, ``dop.in``, ``dop.out`` and ``dop.log``
+  there. Copy the bundled Fortran sources into that directory with
+  ``pydoppler.copy_fortran_code(dop.workdir)`` (or set ``auto_install=True`` when
+  constructing the object). Use ``dop.make_run_dir()`` to create a fresh run
+  directory when running multiple maps.
 
   ```python
+  from pathlib import Path
+
   import pydoppler
 
   # Load base object for tomography
-  dop = pydoppler.spruit()
+  dop = pydoppler.spruit(workdir=Path.cwd() / "pydoppler-workdir")
+  pydoppler.copy_fortran_code(dop.workdir)
 
   # Basic data for the tomography to work
   dop.object = 'U Gem'
@@ -162,7 +169,7 @@
   dop.delw = 35	# size of Doppler map in wavelength centred at lam0
   dop.overs = 0.3 # between 0-1, Undersampling of the spectra. 1= Full resolution
   dop.gama = 36.0  # Systemic velocity in km /s
-  dop.nbins = 28  # Number of bins. Only supported the number of spectra at the moment
+  dop.nbins = 28  # phase bins for diagnostic trail plots (tomography uses all spectra)
   ```
 
   ### Section 3.1: Read the data
@@ -203,14 +210,18 @@
   028 txhugem4031  0.1372 2048
 ```
 
-  ### Section 2.2: Normalise the data and set doppler files
-  You will need to define a continnum band - one at each side of the emission line -
-  to fit and later subtract the continuum. This normalised spectra will be put in
-  in a file to be read by the fortran code.
+  ### Section 3.2: Normalise the data and set Doppler files
+  You will need to define a continuum band (one at each side of the emission line)
+  to fit and later subtract the continuum. The normalised spectra are written to
+  ``dopin`` inside ``dop.workdir``.
+
+  If your phase file includes a third column with per-spectrum exposure widths
+  in orbital phase, pass ``use_list_dpha=True`` to :meth:`Dopin` to write those
+  values into ``dopin``.
   ```python  
   # Normalise the spectra
-      dop.Dopin(continnum_band=[6500,6537,6591,6620],
-      		 plot_median=False,poly_degree=2)
+  dop.Dopin(continuum_band=[6500,6537,6591,6620],
+            plot_median=False, poly_degree=2)
   ```
 
 
@@ -219,89 +230,21 @@
      <img src="pydoppler/test_data/output_images/Trail.png" width="350" height="450" />
   </p>
 
-  ### Section 2.3: Run the fortran code
+  ### Section 3.3: Run the Fortran code
   Now, let's run the tomography software!
   ```python
   # Perform tomography
   dop.Syncdop()
   ```
 
-  The output of the fortran code is:
-  ```
-  nvp 477
-  (28, 477)
-  nv 143 143
-  Estimated Memory required  354  Mbytes
-        parameter (nd=npm*nvpm,nr=0.8*nvm*nvm)
-
-        parameter (nt=nvpm*npm+nvm*nvpm*3+2*npm*nvm)
-
-        parameter (nri=0.9*nvm*nt/nd,ndi=0.9*nvm*nt/nr)
-
-  c parameters for emap routines
-
-        parameter (nf=nd,nfp=ndi,nrp=nri)
-
-        parameter (ni=nvm,nj=nvm)
-
-        parameter (nch=1,nsu=1)
-
-  * Computing MEM tomogram
-  cp -f cclock.f clock.f ; gfortran -O -w -o dopp dop.f clock.f
-  dopp
-  make: dopp: No such file or directory
-  make: *** [dop.out] Error 1
-   RL max entropy, floating defaults
-   ih        0  (log likelihood)                      
-   iw        0  (no error bars read in)               
-   pb0,pb1 0.950 1.050
-   ns        7
-   ac      8.00E-04
-   nim     150
-   al0, alf, nal    0.0020 1.7000  -1
-   clim   1.6000
-   ipri    2
-   norm    1
-   wid, af   0.10E+07 1.0000
-   HOLAQQ NOW 2Q
-   cpu for geometry      0.19
-   HOLAQQQQ
-   it      H+alfa*S        delta
-     1  3.064384039127E+04   8.97E-01
-     2  3.124296879919E+04   8.88E-01
-     3  3.174029201244E+04   8.10E-01
-     4  3.187324638623E+04   6.27E-01
-     5  3.189338120949E+04   4.84E-01
-     6  3.189804389182E+04   3.63E-01
-     7  3.189972657354E+04   2.60E-01
-     8  3.190005031439E+04   2.13E-01
-     9  3.190020880677E+04   1.65E-01
-    10  3.190026635720E+04   1.43E-01
-    11  3.190030859976E+04   1.14E-01
-    12  3.190032174052E+04   9.00E-02
-    13  3.190032685539E+04   7.44E-02
-    14  3.190032853609E+04   5.82E-02
-    15  3.190032918090E+04   4.18E-02
-    16  3.190032942768E+04   2.94E-02
-    17  3.190032951013E+04   2.23E-02
-    18  3.190032954797E+04   1.53E-02
-    19  3.190032956032E+04   1.32E-02
-    20  3.190032956654E+04   9.57E-03
-    21  3.190032956866E+04   5.22E-03
-    22  3.190032956935E+04   1.92E-03
-    23  3.190032956960E+04   2.18E-03
-    24  3.190032956968E+04   8.18E-04
-    25  3.190032956971E+04   4.46E-04
-   ni, al, hs, rr:   25 0.00200  0.319003296E+05 1.48261 1.60000
-   cpu for iteration    0.81
-   entropy -2.4072E+04
-  ```
-  ### Section 2.4: Plot the tomography map
+  The main outputs are written into ``dop.workdir``:
+  ``dop.log`` (iteration log) and ``dop.out`` (tomogram + reconstructions).
+  ### Section 3.4: Plot the tomography map
   This routine will display the outcome of the Doppler tomography. You can overplot
   contours and streams.
   ```python
   # Read and plot map
-  cb,data = dop.Dopmap(limits=[0.05,0.99],colorbar=True,cmaps=cm.mamga_r,
+  cb,data = dop.Dopmap(limits=[0.05,0.99],colorbar=True,cmaps=plt.cm.magma_r,
   					smooth=False,remove_mean=False)
   # Overplot the donor contours, keplerian and ballistic streams
   qm=0.35   # mass ratio M_2 / M_1
@@ -317,7 +260,7 @@
      <img src="pydoppler/test_data/output_images/Doppler_Map.png" width="520" height="450" />
   </p>
 
-  ### Section 2.5: Spectra reconstruction
+  ### Section 3.5: Spectra reconstruction
   Always check that reconstructed spectra looks like the original one. A good
   rule of thumb "If a feature on the Doppler tomogram is not in the trail
   spectrum, most likely its not real!"
@@ -331,13 +274,21 @@
      <img src="pydoppler/test_data/output_images/Reconstruction.png" width="520" height="450" />
   </p>
 
-  ## Section 3: Extra commands
+  ### Section 3.6: Residual diagnostics
+  A lightweight residual diagnostic is available to verify that the reconstructed
+  trail matches the input data.
+
+  ```python
+  dop.Residuals()
+  ```
+
+  ## Section 4: Extra commands
   There are many other commands that will interact with the Doppler tomogram. As
   usual, you can update them inside the pydoppler.spruit object as we did in
-  section 2. The configurable parameters are:
+  section 3. The configurable parameters are:
   ```python3
-  dop.ih = 0            # type of likelihood function (ih=1 for chi-squared)
-  dop.iw = 0            # iw=1 if error bars are to be read and used
+  dop.ih = 0            # 0=log-likelihood, 1=rms/least-squares (chi^2-like)
+  dop.iw = 0            # 1=read error bars from `dopin` (if provided)
   dop.pb0 = 0.95        # range of phases to be ignored, between 0 and 1
   dop.pb1 = 1.05        # range of phases to be ignored, between 1 and 2
   dop.ns = 7            # smearing width in default map
@@ -353,7 +304,7 @@
   dop.af = 0.0          # amplitude of central absorption fudge
   ```
 
-  ## Section 4: Troubleshoot
+  ## Section 5: Troubleshoot
   This is an early version of the wrapper. Things will go wrong. If you find a
   bug or need a feature, I will try my best to work it out. If you think you can
   add to this wrapper, I encourage you push new changes and contribute to it.

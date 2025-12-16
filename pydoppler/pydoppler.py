@@ -134,31 +134,40 @@ def install_sample_script(
 
 
 class spruit:
-    """
-        A class to store and process data for Doppler tomography code
-        by Henk Spruit.
+    """Wrapper around Henk Spruit's Doppler tomography code.
 
-    ...
+    Typical workflow
+    ----------------
+    1. Set ``base_dir`` and ``list`` to point at the spectra and phase file.
+    2. Call :meth:`Foldspec` to load and interpolate spectra to a common grid.
+    3. Call :meth:`Dopin` to continuum-subtract and write ``dopin`` in ``workdir``.
+    4. Call :meth:`Syncdop` to compile/run the Fortran code in ``workdir``.
+    5. Use :meth:`Dopmap`, :meth:`Reco`, and :meth:`Residuals` for diagnostics.
 
-    Methods
-    -------
-    foldspec()
-        Reads the data and stores in spruit object
-    sort(column, order='ascending')
-        Sort by `column`
+    Notes
+    -----
+    - ``workdir`` isolates all Fortran build products and outputs (defaults to
+      ``./pydoppler-workdir``).
+    - ``nbins`` controls the *diagnostic* phase binning used in trail plots; it
+      does not change the inversion, which uses all input spectra.
     """
     def __init__(
         self,
         force_install: bool = False,
-        auto_install: bool = True,
+        auto_install: bool = False,
         interactive: bool = False,
+        workdir: Optional[Union[Path, str]] = None,
     ):
+        default_workdir = Path.cwd() / "pydoppler-workdir"
+        self.workdir = default_workdir if workdir is None else Path(workdir)
+        self.workdir = self.workdir.expanduser().resolve()
         self.object = 'disc'
         self.wave = 0.0
         self.flux = 0.0
         self.pha = 0.0
         self.input_files = 0.0
         self.input_phase = 0.0
+        self.input_dpha = None
         self.trsp = 0.0
         self.nbins = 20
         self.normalised_flux = 0.0
@@ -169,6 +178,8 @@ class spruit:
         self.list = 'phases.txt'
         self.gama = 0.0
         self.delta_phase = 0.001
+        self.flux_err = None
+        self.normalised_flux_err = None
 
         self.verbose = True
         self.interactive = interactive
@@ -207,7 +218,7 @@ class spruit:
         self.lobcol='white'                 # Stream color
 
         if auto_install:
-            self.install_assets(Path.cwd(), force_install)
+            self.install_assets(self.workdir, force_install)
 
     # ------------------------------------------------------------------
     # helper methods
@@ -233,6 +244,7 @@ class spruit:
         """
 
         dest_dir = Path(destination)
+        dest_dir.mkdir(parents=True, exist_ok=True)
 
         copied_fortran = copy_fortran_code(dest_dir, overwrite=force)
         script_path: Optional[Path] = None
@@ -251,16 +263,16 @@ class spruit:
 
 
     def Foldspec(self):
-        """Foldspec. Prepares the spectra to be read by dopin.
-        *** Remember to prepare the keywords before running ***
+        """Load spectra and orbital phases and interpolate onto a common grid.
 
-        Parameters
-        ----------
-        None
+        The phase file (``base_dir/list``) must contain two whitespace-separated
+        columns: ``spectrum_filename  orbital_phase``. An optional third column
+        is interpreted as the exposure width in orbital phase and is stored in
+        ``input_dpha`` (use :meth:`Dopin` with ``use_list_dpha=True`` to write it).
 
-        Returns
-        -------
-        None
+        Individual spectrum files must contain at least two columns (wavelength,
+        flux). A third column is interpreted as 1σ flux uncertainty and will be
+        propagated through the interpolation step.
         """
         list_path = Path(self.base_dir) / self.list
         if not list_path.exists():
@@ -270,33 +282,69 @@ class spruit:
 
         list_dir = list_path.parent
 
-        inputs = np.genfromtxt(
-            list_path,
-            dtype=[("files", "U256"), ("phase", float)],
-            usecols=(0, 1),
-            comments="#",
-            autostrip=True,
-        )
+        rows = []
+        with open(list_path, encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split()
+                if len(parts) < 2:
+                    raise ValueError(f"Invalid phase-file row (expected >=2 columns): {line!r}")
+                fname = parts[0]
+                try:
+                    phase = float(parts[1])
+                except ValueError as exc:
+                    raise ValueError(f"Invalid phase value in row: {line!r}") from exc
+                dpha = None
+                if len(parts) >= 3:
+                    try:
+                        dpha = float(parts[2])
+                    except ValueError as exc:
+                        raise ValueError(f"Invalid exposure width value in row: {line!r}") from exc
+                rows.append((fname, phase, dpha))
 
-        if inputs.shape == ():
-            inputs = inputs.reshape(1,)
-
-        if inputs.size < 1:
+        if not rows:
             raise ValueError("No entries found in the list file.")
 
-        first_file = inputs["files"][0]
+        files = np.asarray([row[0] for row in rows], dtype=str)
+        phases = np.asarray([row[1] for row in rows], dtype=float)
+        dpha_vals = [row[2] for row in rows]
+        if any(val is not None for val in dpha_vals):
+            input_dpha = np.asarray(
+                [np.nan if val is None else float(val) for val in dpha_vals],
+                dtype=float,
+            )
+        else:
+            input_dpha = None
+
+        first_file = files[0]
         first_path = list_dir / first_file
 
+        def _read_spectrum(path: Path):
+            arr = np.loadtxt(path, comments="#")
+            if arr.ndim == 1:
+                arr = arr.reshape(1, -1)
+            if arr.ndim != 2 or arr.shape[1] < 2:
+                raise ValueError("Spectrum file must contain at least two columns (wavelength, flux).")
+            wave = np.asarray(arr[:, 0], dtype=float)
+            flux = np.asarray(arr[:, 1], dtype=float)
+            err = None
+            if arr.shape[1] >= 3:
+                err = np.asarray(arr[:, 2], dtype=float)
+            return wave, flux, err
+
         try:
-            w1st, f1st = np.loadtxt(first_path, usecols=(0, 1), unpack=True)
+            w1st, f1st, e1st = _read_spectrum(first_path)
         except Exception as exc:  # pragma: no cover - numpy handles the heavy lifting
             raise RuntimeError(f"Failed to read first spectrum '{first_path}': {exc}") from exc
 
         wo = w1st
         wave, flux = [], []
+        flux_err: List[Optional[np.ndarray]] = []
 
         if getattr(self, "nbins", None) is None:
-            phases_sorted = np.sort(np.asarray(inputs["phase"], dtype=float))
+            phases_sorted = np.sort(np.asarray(phases, dtype=float))
             dphi = np.diff(phases_sorted)
             dphi = dphi[dphi > 0]
             if dphi.size == 0:
@@ -305,7 +353,7 @@ class spruit:
                 self.nbins = int(max(4, round(1.5 / float(np.median(dphi)))))
 
         try:
-            rep_dphi = float(np.median(np.diff(np.sort(inputs["phase"]))))
+            rep_dphi = float(np.median(np.diff(np.sort(phases))))
         except Exception:  # pragma: no cover - extremely small data set
             rep_dphi = float("nan")
 
@@ -314,19 +362,24 @@ class spruit:
             f"Number of bins: {self.nbins} (median phase spacing {rep_dphi:.5f})",
         )
 
-        for z, (fname, ph) in enumerate(zip(inputs["files"], inputs["phase"])):
+        for z, (fname, ph) in enumerate(zip(files, phases)):
             sp_path = list_dir / fname
             try:
-                w, f = np.loadtxt(sp_path, usecols=(0, 1), unpack=True)
+                w, f, e = _read_spectrum(sp_path)
             except Exception as exc:
                 raise RuntimeError(f"Failed to read spectrum '{sp_path}': {exc}") from exc
 
             if z == 0:
                 wave.append(wo)
                 flux.append(f1st)
+                flux_err.append(e1st)
             else:
                 wave.append(wo)
                 flux.append(np.interp(wo, w, f))
+                if e is None:
+                    flux_err.append(None)
+                else:
+                    flux_err.append(np.sqrt(np.interp(wo, w, np.square(e))))
 
             self._log(
                 logging.INFO,
@@ -335,10 +388,15 @@ class spruit:
 
         self.wave = wave
         self.flux = flux
-        self.pha = np.asarray(inputs["phase"], float)
-        self.input_files = np.asarray(inputs["files"], dtype=str)
-        self.input_phase = np.asarray(inputs["phase"], dtype=float)
+        self.pha = np.asarray(phases, float)
+        self.input_files = np.asarray(files, dtype=str)
+        self.input_phase = np.asarray(phases, dtype=float)
+        self.input_dpha = input_dpha
         self.trsp = np.vstack(flux)
+        if any(err is not None for err in flux_err):
+            self.flux_err = flux_err
+        else:
+            self.flux_err = None
 
 
     def _auto_continuum_band(self) -> Sequence[float]:
@@ -373,57 +431,78 @@ class spruit:
     def Dopin(self,poly_degree=2, continnum_band=False,
               rebin=True,plot_median = False, rebin_wave= 0.,
               xlim=None,two_orbits=True,vel_space=True,
-              verbose=False):
-        """Normalises each spectrum to a user-defined continnum.
-            Optional, it plots a trail spectra. When ``self.interactive`` is
-            ``False`` and no continuum bands are supplied the routine selects
-            suitable regions automatically so it can run headlessly.
+              verbose=False,
+              flux_err: Optional[np.ndarray] = None,
+              estimate_errors: bool = True,
+              use_list_dpha: bool = False,
+              plot: Optional[bool] = None,
+              show: Optional[bool] = None,
+              continuum_band: Optional[Sequence[float]] = None):
+        """Continuum-subtract spectra and write the Fortran input file ``dopin``.
+
+        The method fits a polynomial continuum in two wavelength windows bracketing
+        the emission line, subtracts it from each spectrum, interpolates onto a
+        common velocity grid, and writes the result to ``workdir/dopin`` for
+        Spruit's Fortran tomography code.
 
         Parameters
         ----------
-        poly_degree : int, Optional
-            polynomial degree to fit the continuum. Default, 2.
+        poly_degree:
+            Polynomial degree for the continuum fit.
+        continuum_band:
+            Four wavelength limits ``[x1, x2, x3, x4]`` defining two continuum
+            windows ``(x1, x2)`` and ``(x3, x4)``. When omitted, windows are
+            selected automatically if ``interactive`` is disabled, or chosen
+            interactively when ``interactive=True``.
+        continnum_band:
+            Legacy alias for ``continuum_band`` (kept for backward compatibility).
+        flux_err:
+            Optional 1σ uncertainties with shape ``(nspec, nwave)`` matching the
+            output of :meth:`Foldspec`.
+        estimate_errors:
+            When ``True`` (default) and ``iw==1``, missing/invalid uncertainties
+            are estimated from continuum residuals.
+        use_list_dpha:
+            When ``True``, use the optional third column of the phase file
+            (exposure widths in orbital phase) instead of the scalar ``delta_phase``.
+        plot:
+            When ``True`` produce diagnostic plots; when ``False`` no Matplotlib
+            is imported and only the ``dopin`` file is written.
+        show:
+            When ``True`` display figures (only relevant when ``plot=True``).
 
-        continnum_band : array-like,
-            Define two wavelength bands (x1,x2) and (x3,x4)
-            to fit the continuum.
-            contiunnum_band = [x1,x2,x3,x4].
-            If False, an interactive plot will allow to select this four numbers
-            - Default, False
-
-        plot_median : bool,
-            Plots above teh trail spectra a median of the dataset.
-            - Defautl, False
-
-        rebin_wave : float,
-            TBD
-
-        xlim : float,
-            TBD
-
-        two_orbits : float,
-            TBD
-
-        vel_space : float,
-            TBD
-
-        verbose : float,
-            TBD
-
-        Returns
-        -------
-        None.
-
+        Notes
+        -----
+        ``nbins`` only affects the diagnostic trail plot binning; the inversion
+        uses all spectra/phases written to ``dopin``.
         """
         if not self.wave:
             raise RuntimeError("No spectra loaded. Run 'Foldspec' before normalising.")
 
-        _, plt = _lazy_import_matplotlib_pyplot()
+        if continuum_band is not None:
+            if continnum_band not in (False, None):
+                raise TypeError(
+                    "Pass only one of 'continnum_band' (legacy) or 'continuum_band'."
+                )
+            continnum_band = continuum_band
+
+        if plot is None:
+            plot = bool(self.plot)
+        if show is None:
+            show = bool(plot)
+
+        plt = None
+        if plot or (self.interactive and not continnum_band):
+            _, plt = _lazy_import_matplotlib_pyplot()
+        elif self.interactive and not continnum_band:
+            raise RuntimeError(
+                "Interactive continuum selection requires plotting; set plot=True."
+            )
 
         lam=self.lam0
-        cl=2.997e5
+        cl=2.99792458e5
 
-        cmaps = plt.cm.binary_r #cm.winter_r cm.Blues#cm.gist_stern
+        cmaps = plt.cm.binary_r if plt is not None else None  # noqa: F841
 
         wmin = float(np.min(self.wave[0]))
         wmax = float(np.max(self.wave[0]))
@@ -437,14 +516,23 @@ class spruit:
                 ss=i
 
 
-        fig=plt.figure(num="Average Spec",figsize=(6.57,8.57))
-        plt.clf()
-        ax=fig.add_subplot(211)
         avgspec=np.sum(self.flux,axis=0)
-        plt.plot(self.wave[0],avgspec/len(self.pha))
+        if plot and plt is not None:
+            fig=plt.figure(num="Average Spec",figsize=(6.57,8.57))
+            plt.clf()
+            ax=fig.add_subplot(211)
+            plt.plot(self.wave[0],avgspec/len(self.pha))
 
         if not continnum_band:
             if self.interactive:
+                if plt is None:
+                    raise RuntimeError(
+                        "Interactive continuum selection requires Matplotlib; install it or pass continuum_band."
+                    )
+                if not plot:
+                    raise RuntimeError(
+                        "Interactive continuum selection requires plot=True."
+                    )
                 self._log(logging.INFO, "Choose 4 points to define the continuum.")
                 xor=[]
                 for _ in np.arange(4):
@@ -452,7 +540,7 @@ class spruit:
                     if not selection:
                         raise RuntimeError("Continuum selection aborted by user.")
                     xor.append(float(selection[0][0]))
-                    if self.plot:
+                    if plot:
                         plt.axvline(x=xor[-1],linestyle='--',color='k')
                         plt.draw()
             else:
@@ -462,57 +550,148 @@ class spruit:
                     f"[{xor[0]:.2f}, {xor[1]:.2f}] and [{xor[2]:.2f}, {xor[3]:.2f}] Å."
                 )
                 self._log(logging.INFO, message)
-                if self.plot:
+                if plot and plt is not None:
                     for idx,val in enumerate(xor):
                         label='Cont Bands' if idx == 0 else ''
                         plt.axvline(x=val,linestyle='--',color='k',label=label)
         else:
             xor=[float(v) for v in continnum_band]
             if len(xor) != 4:
-                raise ValueError("continnum_band must contain four wavelength limits.")
+                raise ValueError("continuum_band must contain four wavelength limits.")
             if xor[0] >= xor[1] or xor[2] >= xor[3]:
                 raise ValueError("Each continuum interval must be strictly increasing.")
-            if self.plot:
+            if plot and plt is not None:
                 for idx,val in enumerate(xor):
                     label='Cont Bands' if idx == 0 else ''
                     plt.axvline(x=val,linestyle='--',color='k',label=label)
         lop = ((self.wave[0]>xor[0]) * (self.wave[0]<xor[1])) + ((self.wave[0]>xor[2]) * (self.wave[0]<xor[3]))
         yor=avgspec[lop]/len(self.pha)
-        plt.ylim(avgspec[lop].min()/len(self.pha)*0.8,avgspec.max()/len(self.pha)*1.1)
-        z = np.polyfit(self.wave[0][lop], yor, poly_degree)
-        pz = np.poly1d(z)
-        linfit = pz(self.wave[0])
-        plt.plot(self.wave[0],linfit,'r',label='Cont Fit')
-        lg = plt.legend(fontsize=14)
-        plt.xlim(xor[0]-10,xor[3]+10)
-        plt.xlabel(r'Wavelength / $\AA$')
-        plt.ylabel('Input flux')
+        if plot and plt is not None:
+            plt.ylim(avgspec[lop].min()/len(self.pha)*0.8,avgspec.max()/len(self.pha)*1.1)
+            z = np.polyfit(self.wave[0][lop], yor, poly_degree)
+            pz = np.poly1d(z)
+            linfit = pz(self.wave[0])
+            plt.plot(self.wave[0],linfit,'r',label='Cont Fit')
+            lg = plt.legend(fontsize=14)
+            plt.xlim(xor[0]-10,xor[3]+10)
+            plt.xlabel(r'Wavelength / $\AA$')
+            plt.ylabel('Input flux')
 
 
-        ax=fig.add_subplot(212)
-        vell=((self.wave[0]/self.lam0)**2-1)*cl/(1+(self.wave[0]/self.lam0)**2)
+        if plot and plt is not None:
+            ax=fig.add_subplot(212)
+            vell=((self.wave[0]/self.lam0)**2-1)*cl/(1+(self.wave[0]/self.lam0)**2)
 
-        plt.plot(vell,avgspec/len(self.pha)-linfit,'k')
-        plt.axhline(y=0,linestyle='--',color='k')
-        plt.axvline(x=-self.delw/self.lam0*cl,linestyle='-',color='DarkOrange')
-        plt.axvline(x= self.delw/self.lam0*cl,linestyle='-',
-                    color='DarkOrange',label='DopMap limits')
-        lg = plt.legend(fontsize=14)
-        plt.xlim(-self.delw/self.lam0*cl*1.5,self.delw/self.lam0*cl*1.5)
-        qq = (np.abs(vell) < self.delw/self.lam0*cl*1.5)
-        plt.ylim(-0.05*np.max(avgspec[qq]/len(self.pha)-linfit[qq] -1.0),
-                np.max(avgspec[qq]/len(self.pha)-linfit[qq] -1.0)*1.1)
-        plt.xlabel('Velocity km/s')
-        plt.ylabel('Bkg subtracted Flux')
-        if self.plot:
-            plt.draw()
-        plt.tight_layout()
+            plt.plot(vell,avgspec/len(self.pha)-linfit,'k')
+            plt.axhline(y=0,linestyle='--',color='k')
+            plt.axvline(x=-self.delw/self.lam0*cl,linestyle='-',color='DarkOrange')
+            plt.axvline(x= self.delw/self.lam0*cl,linestyle='-',
+                        color='DarkOrange',label='DopMap limits')
+            lg = plt.legend(fontsize=14)
+            plt.xlim(-self.delw/self.lam0*cl*1.5,self.delw/self.lam0*cl*1.5)
+            qq = (np.abs(vell) < self.delw/self.lam0*cl*1.5)
+            plt.ylim(-0.05*np.max(avgspec[qq]/len(self.pha)-linfit[qq] -1.0),
+                    np.max(avgspec[qq]/len(self.pha)-linfit[qq] -1.0)*1.1)
+            plt.xlabel('Velocity km/s')
+            plt.ylabel('Bkg subtracted Flux')
+            if self.plot:
+                plt.draw()
+            plt.tight_layout()
 
         ######## Do individual fit on the blaze
+        err_input = None
+        if flux_err is not None:
+            err_input = np.asarray(flux_err, dtype=float)
+            if err_input.shape != (len(self.flux), len(self.wave[0])):
+                raise ValueError(
+                    "flux_err must have shape (nspec, nwave) matching the loaded spectra."
+                )
+        elif self.flux_err is not None:
+            try:
+                err_input = np.vstack(
+                    [
+                        np.full_like(self.wave[0], np.nan) if e is None else np.asarray(e, dtype=float)
+                        for e in self.flux_err
+                    ]
+                )
+            except Exception:  # pragma: no cover - defensive
+                err_input = None
+
+        def _estimate_per_spectrum_sigma() -> np.ndarray:
+            beta = self.gama / cl
+            if abs(beta) >= 1:
+                raise ValueError("Systemic velocity 'gama' must satisfy |gama| < c.")
+            nufac = np.sqrt((1.0 + beta) / (1.0 - beta))
+            per_spec_sigma = []
+            for flu in self.flux:
+                polmask = ((self.wave[0]/nufac > xor[0]) * (self.wave[0]/nufac < xor[1])) + (
+                    (self.wave[0]/nufac > xor[2]) * (self.wave[0]/nufac < xor[3])
+                )
+                if np.count_nonzero(polmask) < max(10, poly_degree + 2):
+                    per_spec_sigma.append(np.nan)
+                    continue
+                wave_fit = self.wave[0][polmask] / nufac
+                try:
+                    z = np.polyfit(wave_fit, flu[polmask], poly_degree)
+                except Exception:
+                    per_spec_sigma.append(np.nan)
+                    continue
+                pz = np.poly1d(z)
+                resid = flu[polmask] - pz(wave_fit)
+                per_spec_sigma.append(float(np.nanstd(resid)))
+            sigma = np.asarray(per_spec_sigma, dtype=float)
+            good = np.isfinite(sigma) & (sigma > 0)
+            fill = float(np.nanmedian(sigma[good])) if np.any(good) else 1.0
+            sigma[~good] = fill
+            return sigma
+
+        # When iw=1 we want to write error bars into the dopin file. If the user
+        # didn't provide them (or they are incomplete), estimate from the
+        # continuum regions to make automated runs possible.
+        if self.iw == 1:
+            if err_input is None:
+                if not estimate_errors:
+                    raise RuntimeError(
+                        "iw=1 requests error bars, but none were provided. "
+                        "Pass flux_err=... to Dopin() or set estimate_errors=True."
+                    )
+                sigma = _estimate_per_spectrum_sigma()
+                err_input = np.vstack([np.full_like(self.wave[0], s) for s in sigma])
+                self._log(
+                    logging.INFO,
+                    "Estimated per-spectrum uncertainties from continuum residuals.",
+                )
+            else:
+                err_input = np.asarray(err_input, dtype=float)
+                bad = (~np.isfinite(err_input)) | (err_input <= 0)
+                if np.any(bad):
+                    if estimate_errors:
+                        sigma = _estimate_per_spectrum_sigma()
+                        for ct in range(err_input.shape[0]):
+                            err_input[ct][bad[ct]] = sigma[ct]
+                        self._log(
+                            logging.INFO,
+                            "Filled missing/invalid uncertainties using continuum residual estimates.",
+                        )
+                    else:
+                        for ct in range(err_input.shape[0]):
+                            good = np.isfinite(err_input[ct]) & (err_input[ct] > 0)
+                            fill = float(np.nanmedian(err_input[ct][good])) if np.any(good) else 1.0
+                            err_input[ct][bad[ct]] = fill
+
+            positive = np.isfinite(err_input) & (err_input > 0)
+            floor = float(np.nanmedian(err_input[positive]) * 1e-6) if np.any(positive) else 1e-12
+            if floor <= 0 or not np.isfinite(floor):
+                floor = 1e-12
+            err_input = np.clip(err_input, a_min=floor, a_max=None)
+
         for ct,flu in enumerate(self.flux):
             #print(lop.sum)
             if ct == 0 :
-                nufac=(1.0+self.gama/2.998e5) * np.sqrt(1.0-(self.gama/2.998e5)**2)
+                beta = self.gama / cl
+                if abs(beta) >= 1:
+                    raise ValueError("Systemic velocity 'gama' must satisfy |gama| < c.")
+                nufac = np.sqrt((1.0 + beta) / (1.0 - beta))
                 lop = (self.wave[0]/nufac > self.lam0 - self.delw) * \
                       (self.wave[0]/nufac < self.lam0 + self.delw)
                 self.normalised_wave = np.array(self.wave[0][lop]/nufac)
@@ -521,15 +700,22 @@ class spruit:
                          (self.normalised_wave/self.lam0)**2)
                 self.vell = np.linspace(vell_temp[0],vell_temp[-1],vell_temp.size)
                 self.normalised_flux = np.zeros((len(self.flux),lop.sum()))
+                if err_input is not None:
+                    self.normalised_flux_err = np.zeros((len(self.flux), lop.sum()))
 
             polmask = ((self.wave[0]/nufac>xor[0]) * (self.wave[0]/nufac<xor[1])) +\
                   ((self.wave[0]/nufac>xor[2]) * (self.wave[0]/nufac<xor[3]))
-            z = np.polyfit(self.wave[0][polmask]/nufac,flu[polmask], 3)
+            z = np.polyfit(self.wave[0][polmask]/nufac, flu[polmask], poly_degree)
             pz = np.poly1d(z)
             linfit = pz(self.normalised_wave)
 
             self.normalised_flux[ct] = np.array(flu[lop]) - np.array(linfit)
             self.normalised_flux[ct] = np.interp(self.vell,vell_temp,self.normalised_flux[ct])
+            if self.normalised_flux_err is not None and err_input is not None:
+                sigma = np.asarray(err_input[ct], dtype=float)
+                sigma_roi = np.square(sigma[lop])
+                sigma_vel = np.interp(self.vell, vell_temp, sigma_roi)
+                self.normalised_flux_err[ct] = np.sqrt(np.clip(sigma_vel, a_min=0.0, a_max=None))
 
         self._log(
             logging.INFO,
@@ -537,23 +723,14 @@ class spruit:
         )
 
 
-        ##  JVHS 2019 August 6
-        ## Add binning
-        phase = np.linspace(0,2,self.nbins*2+1,endpoint=True) - 1./(self.nbins)/2.
-        phase = np.concatenate((phase,[2.0+1./(self.nbins)/2.]))
-        phase_dec = phase - np.floor(phase)
-        #print(phase_dec)
-        #rebin_trail(waver, flux, input_phase, nbins, delp, rebin_wave=None):
-        trail,temp_phase = rebin_trail(self.vell, self.normalised_flux,
-                            self.input_phase, self.nbins, self.delta_phase,
-                            rebin_wave=None)
-
         self.pha = self.input_phase
         self.trsp = self.normalised_flux
         #print(">> SHAPES = ",self.pha.shape,self.trsp.shape)
         ## Phases of individual spectra
         #print("LAM_SIZE= {}, VELL_SIZE={}".format(self.normalised_wave.size,self.vell.size))
-        f=open('dopin','w')
+        self.workdir.mkdir(parents=True, exist_ok=True)
+        dopin_path = self.workdir / "dopin"
+        f=open(dopin_path,'w')
         f.write("{:8.0f}{:8.0f}{:13.2f}\n".format(self.pha.size,
                                         self.vell.size,
                                         self.lam0))
@@ -571,7 +748,18 @@ class spruit:
         f.write("\n{:8.0f}\n".format(1))
         ctr = 0
 
-        for pp in np.ones(self.pha.size)*self.delta_phase:
+        if use_list_dpha and self.input_dpha is not None:
+            dpha = np.asarray(self.input_dpha, dtype=float)
+            if dpha.shape != (self.pha.size,):
+                raise ValueError("input_dpha must have shape (nph,) to be written to dopin.")
+            bad = (~np.isfinite(dpha)) | (dpha <= 0)
+            if np.any(bad):
+                dpha = dpha.copy()
+                dpha[bad] = float(self.delta_phase)
+        else:
+            dpha = np.ones(self.pha.size, dtype=float) * float(self.delta_phase)
+
+        for pp in dpha:
                 if ctr <5:
                     f.write("{:13.6f}".format(pp))
                     ctr +=1
@@ -601,8 +789,39 @@ class spruit:
                     f.write("{:13.5f}\n".format(pp))
                     ctr=0
         if ctr != 0: f.write("\n")
+
+        if self.iw == 1:
+            if self.normalised_flux_err is None:
+                raise RuntimeError(
+                    "iw=1 requests error bars, but none are available. "
+                    "Pass flux_err=... to Dopin() or set estimate_errors=True."
+                )
+            ctr = 0
+            for pp in np.array(self.normalised_flux_err.T).flatten():
+                if ctr < 5:
+                    f.write("{:13.5f}".format(pp))
+                    ctr += 1
+                else:
+                    f.write("{:13.5f}\n".format(pp))
+                    ctr = 0
+            if ctr != 0:
+                f.write("\n")
         f.close()
 
+        if not plot or plt is None:
+            return
+
+        delp = float(self.delta_phase)
+        if use_list_dpha and self.input_dpha is not None and np.any(np.isfinite(self.input_dpha)):
+            delp = float(np.nanmedian(self.input_dpha))
+        trail, phase = rebin_trail(
+            self.vell,
+            self.normalised_flux,
+            self.input_phase,
+            self.nbins,
+            delp,
+            rebin_wave=None,
+        )
 
 
         if xlim == None:
@@ -676,7 +895,7 @@ class spruit:
                     label='Median',color='#8e44ad')
             else:
                 self._log(logging.DEBUG, str(dw))
-                new_med = np.interp(waver,wave[rr],
+                new_med = np.interp(waver, self.normalised_wave[rr],
                                     np.nanmedian(self.normalised_flux,axis=0)[rr])
                 plt.plot(waver,np.nanmedian(self.normalised_flux,axis=0)[rr],
                     label='Median',color='k',alpha=1)
@@ -694,8 +913,11 @@ class spruit:
         if vel_space:
             x1_lim = float(np.nanmin(self.vell))
             x2_lim = float(np.nanmax(self.vell))
+            trail_cmap = plt.cm.binary.copy() if hasattr(plt.cm.binary, "copy") else plt.cm.binary
+            if hasattr(trail_cmap, "set_bad"):
+                trail_cmap.set_bad(color="0.85")
             img = plt.imshow(
-                trail.T, interpolation='nearest', cmap=plt.cm.binary, aspect='auto',
+                trail.T, interpolation='nearest', cmap=trail_cmap, aspect='auto',
                 origin='lower', extent=(x1_lim, x2_lim, phase[0], phase[-1] + 1/self.nbins)
             )
             plt.xlim(x1_lim, x2_lim)
@@ -704,8 +926,11 @@ class spruit:
         else:
             x1_lim = float(np.nanmin(self.normalised_wave))
             x2_lim = float(np.nanmax(self.normalised_wave))
+            trail_cmap = plt.cm.binary.copy() if hasattr(plt.cm.binary, "copy") else plt.cm.binary
+            if hasattr(trail_cmap, "set_bad"):
+                trail_cmap.set_bad(color="0.85")
             img = plt.imshow(
-                trail.T, interpolation='nearest', cmap=plt.cm.binary, aspect='auto',
+                trail.T, interpolation='nearest', cmap=trail_cmap, aspect='auto',
                 origin='lower', extent=(x1_lim, x2_lim, phase[0], phase[-1] + 1/self.nbins)
             )
             plt.xlim(self.lam0 - self.delw, self.lam0 + self.delw)
@@ -719,6 +944,8 @@ class spruit:
         plt.ylim(phase[0],lim_two+1/self.nbins/2.)
         plt.ylabel('Orbital Phase')
         plt.tight_layout(h_pad=0)
+        if show:
+            plt.show()
 
 
 
@@ -727,17 +954,17 @@ class spruit:
         Runs the fortran code dopp, using the output files from dopin.
 
         This routine requires the Fortran sources (``dop.f``, ``emap_ori.par``,
-        and ``makefile``) to be present in the current working directory and
-        relies on external tooling (``make`` and ``gfortran``).
+        and ``makefile``) to be present in ``self.workdir`` and relies on
+        external tooling (``make`` and ``gfortran``).
         '''
-        work_dir = Path.cwd()
+        work_dir = self.workdir
         required_files = ("dopin", "emap_ori.par", "dop.f", "makefile")
         for filename in required_files:
             if not (work_dir / filename).is_file():
                 raise FileNotFoundError(
                     f"Required file '{filename}' not found in {work_dir}. "
                     "Run 'Dopin()' first to generate 'dopin' and ensure the bundled "
-                    "Fortran sources are installed (e.g. `pydoppler.copy_fortran_code(Path.cwd())`)."
+                    "Fortran sources are installed (e.g. `pydoppler.copy_fortran_code(dop.workdir)`)."
                 )
 
         if shutil.which("make") is None:
@@ -752,7 +979,7 @@ class spruit:
         compile_flag = True
         dop_log_lines: List[str] = []
         while compile_flag:
-            with open("dop.in", "w", encoding="utf-8") as f:
+            with open(work_dir / "dop.in", "w", encoding="utf-8") as f:
                 f.write(
                     f"{self.ih}     ih       type of likelihood function (ih=1 for chi-squared)\n"
                 )
@@ -780,7 +1007,7 @@ class spruit:
                 )
                 f.write("end of parameter input file")
 
-            with open("dopin", encoding="utf-8") as f:
+            with open(work_dir / "dopin", encoding="utf-8") as f:
                 dopin_lines = [line.strip() for line in f if line.strip()]
             if not dopin_lines:
                 raise RuntimeError("The 'dopin' file is empty. Run 'Dopin()' again.")
@@ -790,7 +1017,7 @@ class spruit:
             except (IndexError, ValueError) as exc:
                 raise RuntimeError("Failed to parse the header line of 'dopin'.") from exc
 
-            with open("emap_ori.par", encoding="utf-8") as f:
+            with open(work_dir / "emap_ori.par", encoding="utf-8") as f:
                 emap_lines = f.readlines()
             if not emap_lines:
                 raise RuntimeError("'emap_ori.par' is empty.")
@@ -824,7 +1051,7 @@ class spruit:
 
             if nv != nvm or npp != npm or nvp != nvpm:
                 header = f"      parameter (npm={npp:4d},nvpm={nvp:4d},nvm={nv:4d})"
-                with open("emap.par", "w", encoding="utf-8") as f:
+                with open(work_dir / "emap.par", "w", encoding="utf-8") as f:
                     f.write(header + "\n")
                     for i, line in enumerate(emap_lines[1:]):
                         if i == 2:
@@ -859,7 +1086,7 @@ class spruit:
                 self._log(logging.DEBUG, result.stderr.rstrip())
 
             try:
-                with open("dop.log", encoding="utf-8") as fo:
+                with open(work_dir / "dop.log", encoding="utf-8") as fo:
                     dop_log_lines = [line.strip() for line in fo if line.strip()]
             except FileNotFoundError as exc:
                 raise FileNotFoundError(
@@ -916,6 +1143,8 @@ class spruit:
         corrx=0,
         corry=0,
         smooth: bool = False,
+        plot: Optional[bool] = None,
+        show: Optional[bool] = None,
     ):
         """
         Read output files from Henk Spruit's *.out and plot a Doppler map
@@ -959,13 +1188,25 @@ class spruit:
             Data cube from Doppler map
 
         """
-        _, plt = _lazy_import_matplotlib_pyplot()
-        if cmaps is None:
-            cmaps = plt.cm.Greys_r
+        if plot is None:
+            plot = bool(self.plot)
+        if show is None:
+            show = bool(plot)
+        if not plot and colorbar:
+            raise ValueError("colorbar=True requires plot=True.")
+
+        plt = None
+        if plot:
+            _, plt = _lazy_import_matplotlib_pyplot()
+            if cmaps is None:
+                cmaps = plt.cm.Greys_r
 
         if self.verbose:
             print(">> Reading {} file".format(dopout))
-        fro=open(dopout,'r')
+        dopout_path = Path(dopout)
+        if not dopout_path.is_absolute():
+            dopout_path = self.workdir / dopout_path
+        fro=open(dopout_path,'r')
         lines=fro.readlines()
         fro.close()
 
@@ -1019,6 +1260,9 @@ class spruit:
 
         data[data == 0.0] = np.nan
 
+        if np.all(np.isnan(data)):
+            raise RuntimeError(f"No finite values found in {dopout_path}.")
+
         new_data = (data - np.nanmin(data)) / (np.nanmax(data) - np.nanmin(data))
         #new_data = np.arcsinh(new_data)
         if limits == None:
@@ -1027,7 +1271,14 @@ class spruit:
             print("Limits auto {:6.5f} {:6.5f}".format(np.nanmedian(data)*0.8,np.nanmedian(data)*1.2))
             print("Limits user {:6.5f} {:6.5f}".format(limits[0],limits[1]))
             print("Limits min={:6.5f}, max={:6.5f}".format(np.nanmin(data),np.nanmax(data)))
+        if not plot or plt is None:
+            return None, new_data
+
         # Here comes the plotting
+        cmap_plot = cmaps.copy() if hasattr(cmaps, "copy") else cmaps
+        if hasattr(cmap_plot, "set_bad"):
+            cmap_plot.set_bad(color="0.85")
+
         fig = plt.figure(num='Doppler Map',figsize=(8.57,8.57))
         plt.clf()
         ax = fig.add_subplot(111)
@@ -1050,19 +1301,19 @@ class spruit:
             if remove_mean:
                 #print data[ll].max(),meano[qq].max()
                 img = plt.imshow((data - meano)/(data - meano)[qq].max(),
-                    interpolation=interp_mode, cmap=cmaps,aspect='equal',
+                    interpolation=interp_mode, cmap=cmap_plot,aspect='equal',
                     origin='lower',extent=(vpmin, vpmax,vpmin, vpmax ),
                     vmin=limits[0],vmax=limits[1])
             else:
                 img = plt.imshow(-(data)/data[ll].max(),
-                    interpolation=interp_mode, cmap=cmaps,aspect='equal',
+                    interpolation=interp_mode, cmap=cmap_plot,aspect='equal',
                     origin='lower',extent=(vpmin, vpmax,vpmin, vpmax),
                     vmin=-limits[1],vmax=-limits[0] )
         else:
             if remove_mean:
                 #print data[ll].max(),meano[qq].max()
                 img = plt.imshow((data - meano)/(data - meano)[qq].max(),
-                    interpolation=interp_mode, cmap=cmaps,aspect='equal',
+                    interpolation=interp_mode, cmap=cmap_plot,aspect='equal',
                     origin='lower',extent=(vpmin, vpmax,vpmin, vpmax),
                     vmin=limits[0],vmax=limits[1])
             else:
@@ -1072,7 +1323,7 @@ class spruit:
                 #print(np.nanmedian(data),np.nanstd(data))
                 print("Limits min={:6.3f}, max={:6.3f}".format(np.nanmin(new_data),np.nanmax(new_data)))
                 img = plt.imshow(new_data,interpolation=interp_mode,
-                    cmap=cmaps,aspect='equal',origin='lower',
+                    cmap=cmap_plot,aspect='equal',origin='lower',
                     extent=(vpmin, vpmax,vpmin, vpmax ),
                     vmin=limits[0],vmax=limits[1] )
 
@@ -1082,8 +1333,6 @@ class spruit:
 
         plt.xlabel('V$_x$ / km s$^{-1}$')
         plt.ylabel('V$_y$ / km s$^{-1}$')
-        plt.tight_layout()
-        plt.show()
         if colorbar:
             from .mynormalize import MyNormalize
 
@@ -1095,7 +1344,11 @@ class spruit:
             cbar = DraggableColorbar(cbar,img)
             cbar.connect()
         else:
-            cbar=1
+            cbar=None
+
+        plt.tight_layout()
+        if show:
+            plt.show()
 
         '''
         if remove_mean:
@@ -1114,7 +1367,14 @@ class spruit:
         return cbar,new_data
 
 
-    def Reco(self, cmaps=None, limits=None, colorbar=True):
+    def Reco(
+        self,
+        cmaps=None,
+        limits=None,
+        colorbar: bool = True,
+        plot: Optional[bool] = None,
+        show: Optional[bool] = None,
+    ):
         """
         Plot original and reconstructed trail spectra from Henk Spruit's *.out
 
@@ -1142,13 +1402,23 @@ class spruit:
             Data cube from reconstructed spectra
 
         """
-        _, plt = _lazy_import_matplotlib_pyplot()
-        if cmaps is None:
-            cmaps = plt.cm.binary
-        if colorbar:
-            from .mynormalize import MyNormalize
+        if plot is None:
+            plot = bool(self.plot)
+        if show is None:
+            show = bool(plot)
+        if not plot and colorbar:
+            raise ValueError("colorbar=True requires plot=True.")
 
-        fro=open('dop.out','r')
+        plt = None
+        if plot:
+            _, plt = _lazy_import_matplotlib_pyplot()
+            if cmaps is None:
+                cmaps = plt.cm.binary
+            if colorbar:
+                from .mynormalize import MyNormalize
+
+        dopout_path = self.workdir / "dop.out"
+        fro=open(dopout_path,'r')
         lines=fro.readlines()
         fro.close()
 
@@ -1211,6 +1481,9 @@ class spruit:
         #dm[dm <= 0.0] = np.nan
         #print(pha)
         #print(self.nbins)
+        if not plot or plt is None:
+            return None, None, dmr, dm
+
         trail_dm,phase = rebin_trail(vp, dm.T, pha, self.nbins, self.delta_phase,
                                     rebin_wave=None)
 
@@ -1226,12 +1499,16 @@ class spruit:
                       np.median(dmr/np.nanmax(dmr))*1.2]
 
         # Now lets do the plotting
+        cmap_plot = cmaps.copy() if hasattr(cmaps, "copy") else cmaps
+        if hasattr(cmap_plot, "set_bad"):
+            cmap_plot.set_bad(color="0.85")
+
         figor = plt.figure('Reconstruction',figsize=(10,8))
         plt.clf()
         ax1 = figor.add_subplot(121)
         print(np.nanmax(trail_dm))
         imgo = plt.imshow(trail_dm.T/np.nanmax(trail_dm),interpolation='nearest',
-                    cmap=cmaps,aspect='auto',origin='upper',
+                    cmap=cmap_plot,aspect='auto',origin='upper',
                     extent=(x1_lim,x2_lim,phase[0],
                             phase[-1]+1/self.nbins),
                     vmin=limits[0], vmax=limits[1])
@@ -1253,13 +1530,12 @@ class spruit:
         ax2 = figor.add_subplot(122)
         print(np.nanmax(trail_dmr))
         imgo = plt.imshow(trail_dmr.T/np.nanmax(trail_dmr),interpolation='nearest',
-                    cmap=cmaps,aspect='auto',origin='upper',
+                    cmap=cmap_plot,aspect='auto',origin='upper',
                     extent=(x1_lim,x2_lim,phase[0],
                             phase[-1]+1/self.nbins),
                     vmin=limits[0], vmax=limits[1])
         ax2.set_xlabel('Velocity / km s$^{-1}$')
         ax2.set_yticklabels([])
-        plt.tight_layout(w_pad=0)
         if colorbar:
             cbar3 = plt.colorbar(format='%.1e',orientation='vertical',
                                 fraction=0.046, pad=0.04)
@@ -1271,7 +1547,114 @@ class spruit:
             cbar3.connect()
         else:
             cbar3=1
+        plt.tight_layout(w_pad=0)
+        if show:
+            plt.show()
         return cbar2,cbar3,dmr,dm
+
+
+    def Residuals(
+        self,
+        dm: Optional[np.ndarray] = None,
+        dmr: Optional[np.ndarray] = None,
+        sigma: Optional[np.ndarray] = None,
+        bins: int = 50,
+        vmax: float = 6.0,
+        plot: Optional[bool] = None,
+        show: Optional[bool] = None,
+        cmaps=None,
+    ):
+        """Plot or return residual diagnostics for the reconstruction.
+
+        Parameters
+        ----------
+        dm, dmr:
+            Data and reconstructed trail spectra as returned by :meth:`Reco`
+            (arrays shaped ``(nvp, nph)``).
+        sigma:
+            Optional uncertainty array with the same shape as ``dm``. When not
+            provided a Poisson-like estimate ``sqrt(|dm|)`` is used.
+        bins:
+            Number of bins in the residual histogram.
+        vmax:
+            Upper limit for the absolute normalised residual image.
+        plot, show:
+            Control plotting. Defaults follow ``self.plot``.
+        cmaps:
+            Matplotlib colormap to use for the residual image.
+
+        Returns
+        -------
+        residuals, norm_residuals:
+            Arrays shaped like the inputs (``(nvp, nph)``).
+        """
+
+        if dm is None or dmr is None:
+            _, _, dmr, dm = self.Reco(plot=False, colorbar=False)
+
+        dm = np.asarray(dm, dtype=float)
+        dmr = np.asarray(dmr, dtype=float)
+        if dm.shape != dmr.shape:
+            raise ValueError("dm and dmr must have the same shape.")
+
+        residuals = dm - dmr
+        if sigma is None:
+            sigma = np.sqrt(np.clip(np.abs(dm), a_min=1e-12, a_max=None))
+        sigma = np.asarray(sigma, dtype=float)
+        if sigma.shape != dm.shape:
+            raise ValueError("sigma must have the same shape as dm.")
+
+        with np.errstate(divide="ignore", invalid="ignore"):
+            norm_residuals = residuals / sigma
+
+        if plot is None:
+            plot = bool(self.plot)
+        if show is None:
+            show = bool(plot)
+        if not plot:
+            return residuals, norm_residuals
+
+        _, plt = _lazy_import_matplotlib_pyplot()
+        if cmaps is None:
+            cmaps = plt.cm.viridis
+        cmap_plot = cmaps.copy() if hasattr(cmaps, "copy") else cmaps
+        if hasattr(cmap_plot, "set_bad"):
+            cmap_plot.set_bad(color="0.85")
+
+        fig = plt.figure("Residuals", figsize=(10, 4))
+        plt.clf()
+
+        ax_img = fig.add_subplot(121)
+        img = ax_img.imshow(
+            np.abs(norm_residuals.T),
+            aspect="auto",
+            origin="upper",
+            vmin=0.0,
+            vmax=vmax,
+            cmap=cmap_plot,
+        )
+        ax_img.set_title("|Residual| / sigma")
+        ax_img.set_xlabel("Velocity bin")
+        ax_img.set_ylabel("Phase bin")
+        plt.colorbar(img, ax=ax_img, fraction=0.046, pad=0.04)
+
+        ax_hist = fig.add_subplot(122)
+        vals = norm_residuals[np.isfinite(norm_residuals)].ravel()
+        ax_hist.hist(vals, bins=bins, histtype="step", density=True, color="k")
+        mu = float(np.nanmedian(vals)) if vals.size else 0.0
+        std = float(np.nanstd(vals)) if vals.size else 1.0
+        x = np.linspace(mu - 5 * std, mu + 5 * std, 200)
+        if std > 0 and np.isfinite(std):
+            gauss = (1.0 / (std * np.sqrt(2 * np.pi))) * np.exp(-0.5 * ((x - mu) / std) ** 2)
+            ax_hist.plot(x, gauss, color="green", lw=1.5, label=f"N({mu:.2f}, {std:.2f})")
+            ax_hist.legend(frameon=False, fontsize=10)
+        ax_hist.axvline(mu, ls="--", color="red", alpha=0.7)
+        ax_hist.set_xlabel("Residual / sigma")
+        ax_hist.set_ylabel("Density")
+        plt.tight_layout()
+        if show:
+            plt.show()
+        return residuals, norm_residuals
 
 def rebin_trail(waver, flux, input_phase, nbins, delp, rebin_wave=None):
     """
@@ -1331,9 +1714,10 @@ def rebin_trail(waver, flux, input_phase, nbins, delp, rebin_wave=None):
         trail += np.outer(flux[i], wts)
         tots += wts
 
-    # avoid division by zero
-    tots[tots == 0] = 1.0
-    trail /= tots
+    mask = tots == 0
+    tots_safe = tots.astype(float)
+    tots_safe[mask] = np.nan
+    trail = trail / tots_safe
     return trail, phase
 
 
@@ -1887,3 +2271,39 @@ def test_data(
     LOGGER.info("Copied %d test data files to %s", len(copied), dest_dir)
     return copied
 
+    def set_workdir(self, destination: Union[Path, str]) -> Path:
+        """Set the working directory used for Fortran execution and outputs.
+
+        Parameters
+        ----------
+        destination:
+            Path where ``dopin``, ``dop.in``, ``dop.out``, and intermediate build
+            products should be created.
+
+        Returns
+        -------
+        pathlib.Path
+            The resolved working directory.
+        """
+
+        self.workdir = Path(destination).expanduser().resolve()
+        self.workdir.mkdir(parents=True, exist_ok=True)
+        return self.workdir
+
+    def make_run_dir(self, prefix: str = "pydoppler-run") -> Path:
+        """Create a new run directory and switch ``workdir`` to it."""
+
+        base = self.workdir.parent if self.workdir.name == "pydoppler-workdir" else self.workdir
+        base.mkdir(parents=True, exist_ok=True)
+        index = 0
+        while True:
+            name = prefix if index == 0 else f"{prefix}-{index}"
+            candidate = base / name
+            try:
+                candidate.mkdir(parents=True, exist_ok=False)
+            except FileExistsError:
+                index += 1
+                continue
+            break
+        self.set_workdir(candidate)
+        return self.workdir

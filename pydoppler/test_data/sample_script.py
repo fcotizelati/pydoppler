@@ -1,12 +1,17 @@
 import pydoppler
 import matplotlib.pyplot as plt
 import numpy as np
+from pathlib import Path
 # Import sample data
 # <<< COMMENT OUT IF YOU DONT NEED THE TEST DATASET >>>
 pydoppler.test_data()
 
+# Fortran execution + outputs are isolated in this directory.
+workdir = Path.cwd() / "pydoppler-workdir"
+pydoppler.copy_fortran_code(workdir)
+
 # Load base object for tomography
-dop = pydoppler.spruit()
+dop = pydoppler.spruit(workdir=workdir)
 
 # Basic data for the tomography to work
 dop.object = 'U Gem'
@@ -23,7 +28,7 @@ dop.nbins = 28
 dop.Foldspec()
 
 # Normalise the spectra
-dop.Dopin(continnum_band=[6500,6537,6591,6620],
+dop.Dopin(continuum_band=[6500,6537,6591,6620],
         plot_median=False,poly_degree=2)
 
 # Perform tomography
@@ -48,29 +53,4 @@ pydoppler.stream(qm,k1,porb,m1,inc)
 # most likely its not real!"
 cb2,cb3,dmr,dm = dop.Reco(colorbar=False,limits=[.05,0.95],cmaps=plt.cm.magma_r)
 
-
-
-from astropy.modeling import models, fitting
-res = plt.figure('Residuals',figsize=(8,4))
-plt.clf()
-ax = res.add_subplot(121)
-residuals = dm - dmr
-sigma = np.sqrt(np.clip(dm, a_min=1e-12, a_max=None))
-sh = plt.imshow(np.abs(residuals.T/sigma.T),aspect='auto',
-                vmin=0,vmax=6)
-cb = plt.colorbar(sh)
-ax = res.add_subplot(122)
-bb = plt.hist(residuals.flatten()/sigma.flatten(),bins=50,color='b',
-        histtype='step',density=True)
-g_init = models.Gaussian1D(amplitude=.008, mean=0, stddev=50.)
-fit_g = fitting.LevMarLSQFitter()
-del_xx = bb[1][1:]-bb[1][1:2]
-g = fit_g(g_init, bb[1][:-1]+del_xx, bb[0])
-plt.plot(bb[1][1:], g(bb[1][1:]), label='Gaussian',color='green')
-ax2= ax.twinx()
-plt.hist(residuals.flatten(),bins=50,color='k',
-        histtype='step',cumulative=True,density=True)
-plt.axvline(x=np.median(residuals.flatten()),
-            linestyle='--',color='r',alpha=0.6)
-plt.xlim(-6,6)
-plt.tight_layout()
+dop.Residuals(dm=dm, dmr=dmr)
