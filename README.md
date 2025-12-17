@@ -72,9 +72,12 @@
   # Keep Fortran build products + outputs isolated
   workdir = Path.cwd() / "pydoppler-workdir"
   pydoppler.copy_fortran_code(workdir)
+  pydoppler.copy_test_data(workdir)
 
   dop = pydoppler.spruit(workdir=workdir, interactive=False)
-  dop.base_dir = "ugem99"
+  dop.delw = 35
+  dop.overs = 0.3
+  dop.base_dir = workdir / "ugem99"
   dop.list = "ugem0all.fas"
   dop.Foldspec()
   dop.Dopin(plot=False)  # continuum bands are estimated automatically

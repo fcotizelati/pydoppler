@@ -161,6 +161,7 @@ class spruit:
         default_workdir = Path.cwd() / "pydoppler-workdir"
         self.workdir = default_workdir if workdir is None else Path(workdir)
         self.workdir = self.workdir.expanduser().resolve()
+        self._workdir_base = self.workdir
         self.object = 'disc'
         self.wave = 0.0
         self.flux = 0.0
@@ -262,6 +263,46 @@ class spruit:
             self._log(logging.DEBUG, "Sample script already present; not copied.")
 
 
+    def set_workdir(self, destination: Union[Path, str]) -> Path:
+        """Set the working directory used for Fortran execution and outputs.
+
+        Parameters
+        ----------
+        destination:
+            Path where ``dopin``, ``dop.in``, ``dop.out``, and intermediate build
+            products should be created.
+
+        Returns
+        -------
+        pathlib.Path
+            The resolved working directory.
+        """
+
+        self.workdir = Path(destination).expanduser().resolve()
+        self.workdir.mkdir(parents=True, exist_ok=True)
+        self._workdir_base = self.workdir
+        return self.workdir
+
+    def make_run_dir(self, prefix: str = "pydoppler-run") -> Path:
+        """Create a new run directory and switch ``workdir`` to it."""
+
+        base = Path(self._workdir_base)
+        base.mkdir(parents=True, exist_ok=True)
+        index = 0
+        while True:
+            name = prefix if index == 0 else f"{prefix}-{index}"
+            candidate = base / name
+            try:
+                candidate.mkdir(parents=True, exist_ok=False)
+            except FileExistsError:
+                index += 1
+                continue
+            break
+        copy_fortran_code(candidate, overwrite=False)
+        self.workdir = candidate.expanduser().resolve()
+        return self.workdir
+
+
     def Foldspec(self):
         """Load spectra and orbital phases and interpolate onto a common grid.
 
@@ -277,7 +318,9 @@ class spruit:
         list_path = Path(self.base_dir) / self.list
         if not list_path.exists():
             raise FileNotFoundError(
-                f"Phase file '{list_path}' is not accessible. Check 'base_dir' and 'list'."
+                f"Phase file '{list_path}' is not accessible. Check 'base_dir' and 'list'. "
+                "If you are trying the bundled example dataset, run `pydoppler.test_data()` "
+                "or `pydoppler.copy_test_data(path)` to copy it into your working directory."
             )
 
         list_dir = list_path.parent
@@ -735,8 +778,9 @@ class spruit:
                                         self.vell.size,
                                         self.lam0))
 #        f.write(str(len(self.flux))+" "+str(self.nbins)+" "+str(self.lam0)+'\n')
+        list_path = Path(self.base_dir) / self.list
         f.write("{:13.5f}{:8.0f}{:8.0f}    {:}\n".format(self.gama*1e5,0,0,
-                                                self.base_dir+'/'+self.list))
+                                                str(list_path)))
         ctr = 0
         for pp in self.pha:
                 if ctr <5:
@@ -1036,10 +1080,10 @@ class spruit:
             if nv % 2 == 1:
                 nv += 1
 
-            nd = npm * nvpm
+            nd = npp * nvp
             nr = 0.8 * nv * nv
-            nt = (nvpm * npm) + (nv * nvpm * 3) + (2 * npm * nv)
-            prmsize = (0.9 * nv * nt) + (0.9 * nv * nt)
+            nt = (nvp * npp) + (nv * nvp * 3) + (2 * npp * nv)
+            prmsize = (float(nri) + float(ndi)) * nv * nt
 
             self._log(
                 logging.INFO,
@@ -1083,6 +1127,17 @@ class spruit:
                         "\n\nHint: the bundled Fortran makefile must execute the local binary as `./dopp` "
                         "(some shells do not include the current directory in PATH). "
                         "Re-copy the Fortran assets with overwrite enabled or edit the makefile in the workdir."
+                    )
+                if (
+                    "ADRP out of range" in output
+                    or "arm64_was_adrp" in output
+                    or "fixup error" in output
+                ):
+                    hint += (
+                        "\n\nHint: On macOS/arm64, very large map dimensions can trigger linker failures. "
+                        "Try reducing `delw` (the wavelength window) and/or `overs` (map undersampling), "
+                        "then rerun `Dopin()` and `Syncdop()`. For the bundled U Gem example, "
+                        "`delw=35` and `overs=0.3` match the provided sample script."
                     )
                 raise RuntimeError(
                     "Failed to build/run the Fortran tomography code via `make dop.out`.\n"
@@ -2280,40 +2335,3 @@ def test_data(
 
     LOGGER.info("Copied %d test data files to %s", len(copied), dest_dir)
     return copied
-
-    def set_workdir(self, destination: Union[Path, str]) -> Path:
-        """Set the working directory used for Fortran execution and outputs.
-
-        Parameters
-        ----------
-        destination:
-            Path where ``dopin``, ``dop.in``, ``dop.out``, and intermediate build
-            products should be created.
-
-        Returns
-        -------
-        pathlib.Path
-            The resolved working directory.
-        """
-
-        self.workdir = Path(destination).expanduser().resolve()
-        self.workdir.mkdir(parents=True, exist_ok=True)
-        return self.workdir
-
-    def make_run_dir(self, prefix: str = "pydoppler-run") -> Path:
-        """Create a new run directory and switch ``workdir`` to it."""
-
-        base = self.workdir.parent if self.workdir.name == "pydoppler-workdir" else self.workdir
-        base.mkdir(parents=True, exist_ok=True)
-        index = 0
-        while True:
-            name = prefix if index == 0 else f"{prefix}-{index}"
-            candidate = base / name
-            try:
-                candidate.mkdir(parents=True, exist_ok=False)
-            except FileExistsError:
-                index += 1
-                continue
-            break
-        self.set_workdir(candidate)
-        return self.workdir

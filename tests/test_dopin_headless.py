@@ -30,6 +30,7 @@ def test_dopin_plot_false_does_not_import_matplotlib(tmp_path: Path):
     sys.modules.pop("matplotlib", None)
 
     dop = _make_synthetic_doppler(tmp_path)
+    dop.base_dir = tmp_path
     dop.Dopin(plot=False)
 
     assert "matplotlib" not in sys.modules
