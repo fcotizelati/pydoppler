@@ -13,6 +13,8 @@ class MyNormalize(Normalize):
     for astronomical images.
     '''
 
+    _ITERABLE = staticmethod(getattr(cbook, "iterable", np.iterable))
+
     def __init__(self, stretch='linear', exponent=5, vmid=None, vmin=None,
                  vmax=None, clip=False):
         '''
@@ -96,7 +98,7 @@ class MyNormalize(Normalize):
         if clip is None:
             clip = self.clip
 
-        if cbook.iterable(value):
+        if self._ITERABLE(value):
             vtype = 'array'
             val = ma.asarray(value).astype(float)
         else:
@@ -168,7 +170,7 @@ class MyNormalize(Normalize):
 
         # CUSTOM APLPY CODE
 
-        if cbook.iterable(value):
+        if self._ITERABLE(value):
             val = ma.asarray(value)
         else:
             val = value

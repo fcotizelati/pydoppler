@@ -33,7 +33,6 @@ c read parameter file
      *     al0,alf,nal,clim,ipri,spec,ih,iw,pb0,pb1,norm)
 c set baseline level to be added to spectrum (fraction of the avg of entire spectrum)
       bfa=0.1
-      write(*,'('' HOLAQQ NOW 2Q'')')
 c read input data
       open(4,file=spec)
       read(4,*) nph,nvp,w0
@@ -96,7 +95,6 @@ c weights
 
 c reconstruction
 c initialize (flat)
-      write(*,'('' HOLAQQQQ'')')
       do j=1,nol
         vmo(j)=sdat/nol
       enddo

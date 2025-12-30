@@ -471,16 +471,24 @@ class spruit:
         )
 
 
-    def Dopin(self,poly_degree=2, continnum_band=False,
-              rebin=True,plot_median = False, rebin_wave= 0.,
-              xlim=None,two_orbits=True,vel_space=True,
-              verbose=False,
-              flux_err: Optional[np.ndarray] = None,
-              estimate_errors: bool = True,
-              use_list_dpha: bool = False,
-              plot: Optional[bool] = None,
-              show: Optional[bool] = None,
-              continuum_band: Optional[Sequence[float]] = None):
+    def Dopin(
+        self,
+        poly_degree=2,
+        continnum_band=False,
+        rebin: bool = True,
+        plot_median: bool = False,
+        rebin_wave=0.0,
+        xlim=None,
+        two_orbits=True,
+        vel_space=True,
+        verbose: Optional[bool] = None,
+        flux_err: Optional[np.ndarray] = None,
+        estimate_errors: bool = True,
+        use_list_dpha: bool = False,
+        plot: Optional[bool] = None,
+        show: Optional[bool] = None,
+        continuum_band: Optional[Sequence[float]] = None,
+    ):
         """Continuum-subtract spectra and write the Fortran input file ``dopin``.
 
         The method fits a polynomial continuum in two wavelength windows bracketing
@@ -508,6 +516,12 @@ class spruit:
         use_list_dpha:
             When ``True``, use the optional third column of the phase file
             (exposure widths in orbital phase) instead of the scalar ``delta_phase``.
+        rebin:
+            When ``True`` (default), phase-bin the diagnostic trail plot into
+            ``nbins``; when ``False`` plot the raw spectra ordered by phase.
+        verbose:
+            Override ``self.verbose`` for this call. Use ``None`` (default) to
+            keep the instance setting.
         plot:
             When ``True`` produce diagnostic plots; when ``False`` no Matplotlib
             is imported and only the ``dopin`` file is written.
@@ -521,6 +535,15 @@ class spruit:
         """
         if not self.wave:
             raise RuntimeError("No spectra loaded. Run 'Foldspec' before normalising.")
+
+        log = self._log
+        if verbose is not None:
+            verbose_flag = bool(verbose)
+
+            def log(level: int, message: str) -> None:
+                self.logger.log(level, message)
+                if verbose_flag and level >= logging.INFO:
+                    print(message)
 
         if continuum_band is not None:
             if continnum_band not in (False, None):
@@ -576,7 +599,7 @@ class spruit:
                     raise RuntimeError(
                         "Interactive continuum selection requires plot=True."
                     )
-                self._log(logging.INFO, "Choose 4 points to define the continuum.")
+                log(logging.INFO, "Choose 4 points to define the continuum.")
                 xor=[]
                 for _ in np.arange(4):
                     selection=plt.ginput(1,timeout=-1)
@@ -592,7 +615,7 @@ class spruit:
                     "Using automatic continuum bands at "
                     f"[{xor[0]:.2f}, {xor[1]:.2f}] and [{xor[2]:.2f}, {xor[3]:.2f}] Å."
                 )
-                self._log(logging.INFO, message)
+                log(logging.INFO, message)
                 if plot and plt is not None:
                     for idx,val in enumerate(xor):
                         label='Cont Bands' if idx == 0 else ''
@@ -700,7 +723,7 @@ class spruit:
                     )
                 sigma = _estimate_per_spectrum_sigma()
                 err_input = np.vstack([np.full_like(self.wave[0], s) for s in sigma])
-                self._log(
+                log(
                     logging.INFO,
                     "Estimated per-spectrum uncertainties from continuum residuals.",
                 )
@@ -712,7 +735,7 @@ class spruit:
                         sigma = _estimate_per_spectrum_sigma()
                         for ct in range(err_input.shape[0]):
                             err_input[ct][bad[ct]] = sigma[ct]
-                        self._log(
+                        log(
                             logging.INFO,
                             "Filled missing/invalid uncertainties using continuum residual estimates.",
                         )
@@ -760,7 +783,7 @@ class spruit:
                 sigma_vel = np.interp(self.vell, vell_temp, sigma_roi)
                 self.normalised_flux_err[ct] = np.sqrt(np.clip(sigma_vel, a_min=0.0, a_max=None))
 
-        self._log(
+        log(
             logging.INFO,
             f">> Max/Min velocities in map: {self.vell.min()} / {self.vell.max()}",
         )
@@ -857,15 +880,31 @@ class spruit:
 
         delp = float(self.delta_phase)
         if use_list_dpha and self.input_dpha is not None and np.any(np.isfinite(self.input_dpha)):
-            delp = float(np.nanmedian(self.input_dpha))
-        trail, phase = rebin_trail(
-            self.vell,
-            self.normalised_flux,
-            self.input_phase,
-            self.nbins,
-            delp,
-            rebin_wave=None,
-        )
+            delp = np.asarray(self.input_dpha, dtype=float)
+
+        if rebin:
+            trail, phase = rebin_trail(
+                self.vell,
+                self.normalised_flux,
+                self.input_phase,
+                self.nbins,
+                delp,
+                rebin_wave=None,
+            )
+            phase_pad = 1.0 / self.nbins
+        else:
+            order = np.argsort(self.input_phase)
+            phase_once = np.asarray(self.input_phase, dtype=float)[order]
+            trail_once = np.asarray(self.normalised_flux, dtype=float)[order].T
+            if two_orbits:
+                phase = np.concatenate([phase_once, phase_once + 1.0])
+                trail = np.concatenate([trail_once, trail_once], axis=1)
+            else:
+                phase = phase_once
+                trail = trail_once
+            diffs = np.diff(phase)
+            diffs = diffs[np.isfinite(diffs) & (diffs > 0)]
+            phase_pad = float(np.nanmedian(diffs)) if diffs.size else 1.0 / self.nbins
 
 
         if xlim == None:
@@ -878,7 +917,7 @@ class spruit:
         else:
             dw = (self.normalised_wave[rr][1] - self.normalised_wave[rr][0]) *\
                                                  rebin_wave
-            self._log(logging.DEBUG, f"Rebin step {dw} ({dw/rebin_wave})")
+            log(logging.DEBUG, f"Rebin step {dw} ({dw/rebin_wave})")
             waver = np.arange(self.normalised_wave[rr][0],
                               self.normalised_wave[rr][-1],dw )
         """
@@ -938,7 +977,7 @@ class spruit:
                 plt.plot(waver,np.nanmedian(self.normalised_flux,axis=0)[rr],
                     label='Median',color='#8e44ad')
             else:
-                self._log(logging.DEBUG, str(dw))
+                log(logging.DEBUG, str(dw))
                 new_med = np.interp(waver, self.normalised_wave[rr],
                                     np.nanmedian(self.normalised_flux,axis=0)[rr])
                 plt.plot(waver,np.nanmedian(self.normalised_flux,axis=0)[rr],
@@ -962,7 +1001,7 @@ class spruit:
                 trail_cmap.set_bad(color="0.85")
             img = plt.imshow(
                 trail.T, interpolation='nearest', cmap=trail_cmap, aspect='auto',
-                origin='lower', extent=(x1_lim, x2_lim, phase[0], phase[-1] + 1/self.nbins)
+                origin='lower', extent=(x1_lim, x2_lim, phase[0], phase[-1] + phase_pad)
             )
             plt.xlim(x1_lim, x2_lim)
             plt.xlabel('Velocity / km s$^{-1}$')
@@ -975,17 +1014,20 @@ class spruit:
                 trail_cmap.set_bad(color="0.85")
             img = plt.imshow(
                 trail.T, interpolation='nearest', cmap=trail_cmap, aspect='auto',
-                origin='lower', extent=(x1_lim, x2_lim, phase[0], phase[-1] + 1/self.nbins)
+                origin='lower', extent=(x1_lim, x2_lim, phase[0], phase[-1] + phase_pad)
             )
             plt.xlim(self.lam0 - self.delw, self.lam0 + self.delw)
             plt.xlabel('Wavelength / $\\AA$')
             plt.axvline(x=self.lam0, ls='--', color='DarkOrange')
                   
-        if two_orbits:
-            lim_two = 2
+        if rebin:
+            if two_orbits:
+                lim_two = 2
+            else:
+                lim_two = 1
+            plt.ylim(phase[0], lim_two + 1 / self.nbins / 2.0)
         else:
-            lim_two = 1
-        plt.ylim(phase[0],lim_two+1/self.nbins/2.)
+            plt.ylim(phase[0], phase[-1] + phase_pad / 2.0)
         plt.ylabel('Orbital Phase')
         plt.tight_layout(h_pad=0)
         if show:
@@ -1328,7 +1370,15 @@ class spruit:
         if np.all(np.isnan(data)):
             raise RuntimeError(f"No finite values found in {dopout_path}.")
 
-        new_data = (data - np.nanmin(data)) / (np.nanmax(data) - np.nanmin(data))
+        data_min = np.nanmin(data)
+        data_max = np.nanmax(data)
+        span = data_max - data_min
+        if not np.isfinite(span) or span <= 0:
+            new_data = np.zeros_like(data, dtype=float)
+            if limits == None:
+                limits = [0.0, 1.0]
+        else:
+            new_data = (data - data_min) / span
         #new_data = np.arcsinh(new_data)
         if limits == None:
             limits = [np.nanmax((new_data))*0.95,np.nanmax((new_data))*1.05]
@@ -1549,10 +1599,10 @@ class spruit:
         if not plot or plt is None:
             return None, None, dmr, dm
 
-        trail_dm,phase = rebin_trail(vp, dm.T, pha, self.nbins, self.delta_phase,
+        trail_dm,phase = rebin_trail(vp, dm.T, pha, self.nbins, dpha,
                                     rebin_wave=None)
 
-        trail_dmr,phase = rebin_trail(vp, dmr.T, pha, self.nbins, self.delta_phase,
+        trail_dmr,phase = rebin_trail(vp, dmr.T, pha, self.nbins, dpha,
                                     rebin_wave=None)
 
         delvp = vp[1]-vp[0]
@@ -1572,11 +1622,22 @@ class spruit:
         plt.clf()
         ax1 = figor.add_subplot(121)
         print(np.nanmax(trail_dm))
-        imgo = plt.imshow(trail_dm.T/np.nanmax(trail_dm),interpolation='nearest',
-                    cmap=cmap_plot,aspect='auto',origin='upper',
-                    extent=(x1_lim,x2_lim,phase[0],
-                            phase[-1]+1/self.nbins),
-                    vmin=limits[0], vmax=limits[1])
+        norm_dm = None
+        if colorbar:
+            norm_dm = MyNormalize(vmin=limits[0], vmax=limits[1], stretch='linear')
+        imshow_kwargs = dict(
+            interpolation='nearest',
+            cmap=cmap_plot,
+            aspect='auto',
+            origin='upper',
+            extent=(x1_lim, x2_lim, phase[0], phase[-1] + 1 / self.nbins),
+        )
+        if norm_dm is None:
+            imshow_kwargs["vmin"] = limits[0]
+            imshow_kwargs["vmax"] = limits[1]
+        else:
+            imshow_kwargs["norm"] = norm_dm
+        imgo = plt.imshow(trail_dm.T/np.nanmax(trail_dm), **imshow_kwargs)
 
         ax1.set_xlabel('Velocity / km s$^{-1}$')
         ax1.set_ylabel('Orbital Phase')
@@ -1585,29 +1646,34 @@ class spruit:
             cbar2 = plt.colorbar(format='%.1e',orientation='vertical',
                                 fraction=0.046, pad=0.04)
             cbar2.set_label('Normalised Flux')
-            cbar2.set_norm(MyNormalize(vmin=np.median(dm/np.nanmax(dm))*0.8,
-                                    vmax=np.median(dm/np.nanmax(dm))*1.1,
-                                    stretch='linear'))
             cbar2 = DraggableColorbar(cbar2,imgo)
             cbar2.connect()
         else:
             cbar2=1
         ax2 = figor.add_subplot(122)
         print(np.nanmax(trail_dmr))
-        imgo = plt.imshow(trail_dmr.T/np.nanmax(trail_dmr),interpolation='nearest',
-                    cmap=cmap_plot,aspect='auto',origin='upper',
-                    extent=(x1_lim,x2_lim,phase[0],
-                            phase[-1]+1/self.nbins),
-                    vmin=limits[0], vmax=limits[1])
+        norm_dmr = None
+        if colorbar:
+            norm_dmr = MyNormalize(vmin=limits[0], vmax=limits[1], stretch='linear')
+        imshow_kwargs = dict(
+            interpolation='nearest',
+            cmap=cmap_plot,
+            aspect='auto',
+            origin='upper',
+            extent=(x1_lim, x2_lim, phase[0], phase[-1] + 1 / self.nbins),
+        )
+        if norm_dmr is None:
+            imshow_kwargs["vmin"] = limits[0]
+            imshow_kwargs["vmax"] = limits[1]
+        else:
+            imshow_kwargs["norm"] = norm_dmr
+        imgo = plt.imshow(trail_dmr.T/np.nanmax(trail_dmr), **imshow_kwargs)
         ax2.set_xlabel('Velocity / km s$^{-1}$')
         ax2.set_yticklabels([])
         if colorbar:
             cbar3 = plt.colorbar(format='%.1e',orientation='vertical',
                                 fraction=0.046, pad=0.04)
             cbar3.set_label('Normalised Flux')
-            cbar3.set_norm(MyNormalize(vmin=np.median(dmr/np.nanmax(dmr))*0.8,
-                                    vmax=np.median(dmr/np.nanmax(dmr))*1.1,
-                                    stretch='linear'))
             cbar3 = DraggableColorbar(cbar3,imgo)
             cbar3.connect()
         else:
@@ -1735,8 +1801,9 @@ def rebin_trail(waver, flux, input_phase, nbins, delp, rebin_wave=None):
         Orbital phase (0..1) for each spectrum in `flux`.
     nbins : int
         Number of phase bins in [0,1).
-    delp : float
+    delp : float or 1D array
         Effective phase width per spectrum for bin-weighting (typically ~1/nbins).
+        When an array is provided it must match ``input_phase``.
     rebin_wave : None
         (Kept for API compatibility; not used because `flux` is already on `waver`.)
 
@@ -1748,6 +1815,9 @@ def rebin_trail(waver, flux, input_phase, nbins, delp, rebin_wave=None):
         Phase coordinate for `trail` columns.
     """
     # two orbits + half-bin shift, like upstream
+    input_phase = np.asarray(input_phase, dtype=float)
+    flux = np.asarray(flux, dtype=float)
+
     phase = np.linspace(0, 2, nbins * 2 + 1, endpoint=True) - 1.0 / nbins / 2.0
     phase = np.concatenate((phase, [2.0 + 1.0 / nbins / 2.0]))
     phase_dec = phase - np.floor(phase)
@@ -1757,11 +1827,22 @@ def rebin_trail(waver, flux, input_phase, nbins, delp, rebin_wave=None):
     tots = np.zeros(phase.size, dtype=float)
 
     inv_bin = 1.0 / nbins
-    half = delp / 2.0
+    delp_vals = np.asarray(delp, dtype=float)
+    if delp_vals.ndim == 0:
+        delp_vals = np.full(input_phase.shape, float(delp_vals))
+    elif delp_vals.shape != input_phase.shape:
+        raise ValueError("delp must be a scalar or have shape (nspec,).")
+
+    bad = (~np.isfinite(delp_vals)) | (delp_vals <= 0)
+    if np.any(bad):
+        fill = float(np.nanmedian(delp_vals[~bad])) if np.any(~bad) else inv_bin
+        delp_vals = delp_vals.copy()
+        delp_vals[bad] = fill
 
     for i in range(input_phase.size):
         # build trapezoidal weights for interval [phi - half, phi + half]
         phi = input_phase[i]
+        half = delp_vals[i] / 2.0
         wts = np.zeros_like(phase_dec)
         # right edge
         d = phase_dec - (phi + half)
@@ -1793,18 +1874,32 @@ class DraggableColorbar(object):
         self.mappable = mappable
         self.press = None
         self.cycle = sorted([i for i in dir(plt.cm) if hasattr(getattr(plt.cm,i),'N')])
-        self.index = self.cycle.index(cbar.get_cmap().name)
+        current_cmap = None
+        if hasattr(cbar, "get_cmap"):
+            current_cmap = cbar.get_cmap()
+        elif hasattr(cbar, "cmap"):
+            current_cmap = cbar.cmap
+        elif hasattr(cbar, "mappable"):
+            current_cmap = cbar.mappable.get_cmap()
+        else:
+            current_cmap = mappable.get_cmap()
+        self.index = self.cycle.index(current_cmap.name) if current_cmap else 0
+
+    def _refresh(self) -> None:
+        if hasattr(self.cbar, "update_normal"):
+            self.cbar.update_normal(self.mappable)
+        elif hasattr(self.cbar, "draw_all"):
+            self.cbar.draw_all()
+        if hasattr(self.cbar, "ax") and self.cbar.ax and self.cbar.ax.figure:
+            self.cbar.ax.figure.canvas.draw()
 
     def connect(self):
         """connect to all the events we need"""
-        self.cidpress = self.cbar.patch.figure.canvas.mpl_connect(
-            'button_press_event', self.on_press)
-        self.cidrelease = self.cbar.patch.figure.canvas.mpl_connect(
-            'button_release_event', self.on_release)
-        self.cidmotion = self.cbar.patch.figure.canvas.mpl_connect(
-            'motion_notify_event', self.on_motion)
-        self.keypress = self.cbar.patch.figure.canvas.mpl_connect(
-            'key_press_event', self.key_press)
+        canvas = self.cbar.ax.figure.canvas
+        self.cidpress = canvas.mpl_connect('button_press_event', self.on_press)
+        self.cidrelease = canvas.mpl_connect('button_release_event', self.on_release)
+        self.cidmotion = canvas.mpl_connect('motion_notify_event', self.on_motion)
+        self.keypress = canvas.mpl_connect('key_press_event', self.key_press)
 
     def on_press(self, event):
         """on button press we will see if the mouse is over us and store some data"""
@@ -1821,11 +1916,11 @@ class DraggableColorbar(object):
         elif self.index>=len(self.cycle):
             self.index = 0
         cmap = self.cycle[self.index]
-        self.cbar.set_cmap(cmap)
-        self.cbar.draw_all()
+        if hasattr(self.cbar, "set_cmap"):
+            self.cbar.set_cmap(cmap)
         self.mappable.set_cmap(cmap)
         #self.mappable.get_axes().set_title(cmap)
-        self.cbar.patch.figure.canvas.draw()
+        self._refresh()
 
     def on_motion(self, event):
         'on motion we will move the rect if the mouse is over us'
@@ -1844,22 +1939,22 @@ class DraggableColorbar(object):
         elif event.button==3:
             self.cbar.norm.vmin -= (perc*scale)*np.sign(dy)
             self.cbar.norm.vmax += (perc*scale)*np.sign(dy)
-        self.cbar.draw_all()
         self.mappable.set_norm(self.cbar.norm)
-        self.cbar.patch.figure.canvas.draw()
+        self._refresh()
 
 
     def on_release(self, event):
         """on release we reset the press data"""
         self.press = None
         self.mappable.set_norm(self.cbar.norm)
-        self.cbar.patch.figure.canvas.draw()
+        self._refresh()
 
     def disconnect(self):
         """disconnect all the stored connection ids"""
-        self.cbar.patch.figure.canvas.mpl_disconnect(self.cidpress)
-        self.cbar.patch.figure.canvas.mpl_disconnect(self.cidrelease)
-        self.cbar.patch.figure.canvas.mpl_disconnect(self.cidmotion)
+        canvas = self.cbar.ax.figure.canvas
+        canvas.mpl_disconnect(self.cidpress)
+        canvas.mpl_disconnect(self.cidrelease)
+        canvas.mpl_disconnect(self.cidmotion)
 
 
 def radial_profile(data, center):
@@ -1985,7 +2080,10 @@ def stream_calculate(qm,ni = 100,nj = 100):
     rout = np.zeros(nmax)
     wout = np.zeros(nmax,dtype=complex)
     wkout = np.zeros(nmax,dtype=complex)
-    if np.abs(qm - 1.) < 1e-4: qm = 1e-4
+    if np.abs(qm - 1.0) <= 1e-4:
+        # Nudge away from exact unity to avoid convergence issues without
+        # collapsing to an extreme mass ratio.
+        qm = 1.0 - 1e-3 if qm <= 1.0 else 1.0 + 1e-3
     rd = 0.1
     if qm <= 0.0:
         print ('Mass ratio <= 0. Does not compute. Will exit.')
