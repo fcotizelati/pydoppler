@@ -375,6 +375,34 @@ class spruit:
             err = None
             if arr.shape[1] >= 3:
                 err = np.asarray(arr[:, 2], dtype=float)
+
+            # Keep the interpolation grid well-defined for np.interp:
+            # sort by wavelength and collapse duplicate coordinates.
+            order = np.argsort(wave)
+            wave = wave[order]
+            flux = flux[order]
+            if err is not None:
+                err = err[order]
+
+            finite = np.isfinite(wave) & np.isfinite(flux)
+            if err is not None:
+                finite &= np.isfinite(err)
+            wave = wave[finite]
+            flux = flux[finite]
+            if err is not None:
+                err = err[finite]
+            if wave.size < 2:
+                raise ValueError("Spectrum must contain at least two finite wavelength/flux samples.")
+
+            if np.any(np.diff(wave) <= 0):
+                uniq_wave, inv = np.unique(wave, return_inverse=True)
+                counts = np.bincount(inv).astype(float)
+                flux_sum = np.bincount(inv, weights=flux)
+                flux = flux_sum / counts
+                if err is not None:
+                    err2_sum = np.bincount(inv, weights=np.square(err))
+                    err = np.sqrt(err2_sum / counts)
+                wave = uniq_wave
             return wave, flux, err
 
         try:
@@ -417,6 +445,12 @@ class spruit:
                 flux.append(f1st)
                 flux_err.append(e1st)
             else:
+                if wo[0] < w[0] or wo[-1] > w[-1]:
+                    raise ValueError(
+                        f"Spectrum '{sp_path}' wavelength coverage "
+                        f"[{w[0]:.6f}, {w[-1]:.6f}] does not cover reference grid "
+                        f"[{wo[0]:.6f}, {wo[-1]:.6f}]."
+                    )
                 wave.append(wo)
                 flux.append(np.interp(wo, w, f))
                 if e is None:
@@ -631,6 +665,13 @@ class spruit:
                     label='Cont Bands' if idx == 0 else ''
                     plt.axvline(x=val,linestyle='--',color='k',label=label)
         lop = ((self.wave[0]>xor[0]) * (self.wave[0]<xor[1])) + ((self.wave[0]>xor[2]) * (self.wave[0]<xor[3]))
+        n_cont = int(np.count_nonzero(lop))
+        min_cont = max(poly_degree + 1, 3)
+        if n_cont < min_cont:
+            raise ValueError(
+                f"Continuum windows contain {n_cont} samples, but at least {min_cont} "
+                f"are required for a degree-{poly_degree} polynomial fit."
+            )
         yor=avgspec[lop]/len(self.pha)
         if plot and plt is not None:
             plt.ylim(avgspec[lop].min()/len(self.pha)*0.8,avgspec.max()/len(self.pha)*1.1)
@@ -760,6 +801,12 @@ class spruit:
                 nufac = np.sqrt((1.0 + beta) / (1.0 - beta))
                 lop = (self.wave[0]/nufac > self.lam0 - self.delw) * \
                       (self.wave[0]/nufac < self.lam0 + self.delw)
+                if np.count_nonzero(lop) < 2:
+                    raise ValueError(
+                        "No spectral samples fall inside the Doppler-map wavelength window "
+                        "(lam0 ± delw) after gamma correction. Increase 'delw' or verify "
+                        "'lam0'/'gama' and the wavelength grid."
+                    )
                 self.normalised_wave = np.array(self.wave[0][lop]/nufac)
                 # Interpolate in velocity space
                 vell_temp=((self.normalised_wave/self.lam0)**2-1.0)*cl/(1.0 + \
@@ -771,6 +818,10 @@ class spruit:
 
             polmask = ((self.wave[0]/nufac>xor[0]) * (self.wave[0]/nufac<xor[1])) +\
                   ((self.wave[0]/nufac>xor[2]) * (self.wave[0]/nufac<xor[3]))
+            if np.count_nonzero(polmask) < max(poly_degree + 1, 3):
+                raise ValueError(
+                    f"Continuum windows contain too few samples for spectrum index {ct}."
+                )
             z = np.polyfit(self.wave[0][polmask]/nufac, flu[polmask], poly_degree)
             pz = np.poly1d(z)
             linfit = pz(self.normalised_wave)
@@ -1814,16 +1865,27 @@ def rebin_trail(waver, flux, input_phase, nbins, delp, rebin_wave=None):
     phase : 1D array, shape (2*nbins+2,)
         Phase coordinate for `trail` columns.
     """
-    # two orbits + half-bin shift, like upstream
+    waver = np.asarray(waver, dtype=float)
     input_phase = np.asarray(input_phase, dtype=float)
     flux = np.asarray(flux, dtype=float)
+    if waver.ndim != 1 or waver.size == 0:
+        raise ValueError("waver must be a non-empty 1D array.")
+    if flux.ndim != 2:
+        raise ValueError("flux must be a 2D array with shape (nspec, nwave).")
+    if flux.shape[0] != input_phase.size:
+        raise ValueError("flux and input_phase must contain the same number of spectra.")
+    if flux.shape[1] != waver.size:
+        raise ValueError("flux.shape[1] must match waver.size.")
+    nbins = int(nbins)
+    if nbins <= 0:
+        raise ValueError("nbins must be a positive integer.")
 
+    # Two orbits + half-bin shift, like upstream.
     phase = np.linspace(0, 2, nbins * 2 + 1, endpoint=True) - 1.0 / nbins / 2.0
     phase = np.concatenate((phase, [2.0 + 1.0 / nbins / 2.0]))
     phase_dec = phase - np.floor(phase)
 
-    nw = waver.size
-    trail = np.zeros((nw, phase.size), dtype=float)
+    trail = np.zeros((waver.size, phase.size), dtype=float)
     tots = np.zeros(phase.size, dtype=float)
 
     inv_bin = 1.0 / nbins
@@ -1840,29 +1902,28 @@ def rebin_trail(waver, flux, input_phase, nbins, delp, rebin_wave=None):
         delp_vals[bad] = fill
 
     for i in range(input_phase.size):
-        # build trapezoidal weights for interval [phi - half, phi + half]
-        phi = input_phase[i]
-        half = delp_vals[i] / 2.0
+        # Build trapezoidal weights for interval [phi - half, phi + half] in
+        # circular phase space to preserve contributions across phase wrap.
+        phi = float(input_phase[i] - np.floor(input_phase[i]))
+        half = float(delp_vals[i]) / 2.0
         wts = np.zeros_like(phase_dec)
-        # right edge
-        d = phase_dec - (phi + half)
+
+        d = _phase_signed_delta(phase_dec, phi + half)
         d[np.abs(d) > inv_bin] = 0.0
         d[d > 0] = 0.0
         wts += np.abs(d) / inv_bin
-        # left edge
-        d = phase_dec - (phi - half)
+
+        d = _phase_signed_delta(phase_dec, phi - half)
         d[np.abs(d) > inv_bin] = 0.0
         d[d > 0] = 0.0
-        mask = (np.abs(d) > 0)
+        mask = np.abs(d) > 0
         wts[mask] += 1.0 - (np.abs(d[mask]) / inv_bin)
 
-        # accumulate
         trail += np.outer(flux[i], wts)
         tots += wts
 
-    mask = tots == 0
     tots_safe = tots.astype(float)
-    tots_safe[mask] = np.nan
+    tots_safe[tots_safe == 0.0] = np.nan
     trail = trail / tots_safe
     return trail, phase
 
@@ -2086,8 +2147,7 @@ def stream_calculate(qm,ni = 100,nj = 100):
         qm = 1.0 - 1e-3 if qm <= 1.0 else 1.0 + 1e-3
     rd = 0.1
     if qm <= 0.0:
-        print ('Mass ratio <= 0. Does not compute. Will exit.')
-        return
+        raise ValueError("Mass ratio q must be > 0.")
     rl1 = rlq1(qm)
 
     x,y = lobes(qm,rl1,ni,nj)
@@ -2231,8 +2291,7 @@ def pot(q,x,y,z):
     '''
     r = np.sqrt(x*x+y*y+z*z)
     if (r == 0):
-        print ('r=0 in pot')
-        stop
+        raise ValueError("Invalid coordinates in pot(): r=0 leads to a singular potential.")
     rh = np.sqrt(x*x+y*y)
     st=rh/r
     if rh == 0:
@@ -2258,15 +2317,14 @@ def surface(q,rs,nc,nop,r,ch,ps):
     output:
     r(nf,nt): radius. ch, ps: chi and psi arrays
     '''
-    r = np.zeros((100,100))
-    chi = [],ps
+    r = np.zeros((nc,nop))
     dc = np.pi/nc
     ch[0] = 0
     for i in np.arange(nc-1)+1:
-        ch[i] = float((i-1.0))*np.pi/(nc-1.)
+        ch[i] = float(i)*np.pi/(nc-1.)
     ps[0] = 0
     for j in np.arange(nop-1)+1:
-        ps[i] = float((j-1.0))*2.*np.pi/nop
+        ps[j] = float(j)*2.*np.pi/nop
     rs1 = 1.0 -rs
     fs,pr = pot(q,rs1,0.0,0.0)
 
@@ -2293,8 +2351,9 @@ def surface(q,rs,nc,nop,r,ch,ps):
                 rx = r1 - (f - fs)/pr
                 if rx > rs1: rx = rs1
             if j >= im:
-                print( 'No conv in surf',k,i,ch[k],ps[i])
-                stop
+                raise RuntimeError(
+                    f"No convergence in surface() at k={k}, i={i}, ch={ch[k]}, ps={ps[i]}"
+                )
 
             r[k,i] = rx
 
@@ -2433,3 +2492,9 @@ def test_data(
 
     LOGGER.info("Copied %d test data files to %s", len(copied), dest_dir)
     return copied
+
+
+def _phase_signed_delta(a: np.ndarray, b: float) -> np.ndarray:
+    """Return signed circular phase difference in [-0.5, 0.5)."""
+
+    return ((a - b + 0.5) % 1.0) - 0.5
