@@ -18,7 +18,7 @@ if SAVE_PNGS and not SHOW_PLOTS:
 import matplotlib.pyplot as plt
 # Import sample data
 # <<< COMMENT OUT IF YOU DONT NEED THE TEST DATASET >>>
-pydoppler.test_data()
+pydoppler.copy_test_data(workdir, overwrite=True)
 
 pydoppler.copy_fortran_code(workdir, overwrite=True)
 
@@ -27,7 +27,7 @@ dop = pydoppler.spruit(workdir=workdir)
 
 # Basic data for the tomography to work
 dop.object = 'U Gem'
-dop.base_dir = 'ugem99' # Base directory for input spectra
+dop.base_dir = workdir / 'ugem99' # Base directory for input spectra
 dop.list = 'ugem0all.fas'		# Name of the input file
 dop.lam0 = 6562.8 # Wavelength zero in units of the original spectra
 dop.delta_phase = 0.003

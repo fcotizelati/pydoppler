@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import shutil
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Sequence, Union
 
@@ -61,20 +62,199 @@ def _copy_tree(source, destination: Path, overwrite: bool = False) -> List[Path]
     dest_path.mkdir(parents=True, exist_ok=True)
 
     copied: List[Path] = []
-    for item in source.rglob("*"):
-        if item.is_dir():
-            continue
 
-        target = dest_path / item.relative_to(source)
-        if target.exists() and not overwrite:
-            continue
+    def _walk(node, relative: Path = Path(".")) -> None:
+        for item in node.iterdir():
+            item_rel = relative / item.name
+            if item.is_dir():
+                _walk(item, item_rel)
+                continue
 
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with item.open("rb") as src, target.open("wb") as dst:
-            shutil.copyfileobj(src, dst)
-        copied.append(target)
+            target = dest_path / item_rel
+            if target.exists() and not overwrite:
+                continue
+
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with item.open("rb") as src, target.open("wb") as dst:
+                shutil.copyfileobj(src, dst)
+            copied.append(target)
+
+    _walk(source)
 
     return copied
+
+
+@dataclass
+class DopplerOutput:
+    path: Path
+    nph: int
+    nvp: int
+    nv: int
+    w0: float
+    aa: float
+    gamma: float
+    pha: np.ndarray
+    dpha: np.ndarray
+    vp: np.ndarray
+    dm: np.ndarray
+    im: np.ndarray
+    dmr: np.ndarray
+    dpx: np.ndarray
+
+
+def _normalise_to_unit_interval(data: np.ndarray) -> np.ndarray:
+    """Return *data* scaled to [0, 1] while preserving NaNs."""
+
+    arr = np.asarray(data, dtype=float)
+    finite = np.isfinite(arr)
+    if not np.any(finite):
+        return np.full_like(arr, np.nan, dtype=float)
+
+    data_min = float(np.nanmin(arr[finite]))
+    data_max = float(np.nanmax(arr[finite]))
+    span = data_max - data_min
+
+    out = np.full_like(arr, np.nan, dtype=float)
+    if not np.isfinite(span) or span <= 0:
+        out[finite] = 0.0
+        return out
+
+    out[finite] = (arr[finite] - data_min) / span
+    return out
+
+
+def _scale_by_absmax(data: np.ndarray) -> np.ndarray:
+    """Scale *data* by its finite absolute maximum, preserving NaNs."""
+
+    arr = np.asarray(data, dtype=float)
+    finite = np.isfinite(arr)
+    if not np.any(finite):
+        return np.full_like(arr, np.nan, dtype=float)
+
+    scale = float(np.nanmax(np.abs(arr[finite])))
+    out = np.full_like(arr, np.nan, dtype=float)
+    if not np.isfinite(scale) or scale <= 0:
+        out[finite] = 0.0
+        return out
+
+    out[finite] = arr[finite] / scale
+    return out
+
+
+def _auto_display_limits(data: np.ndarray, *, positive: bool = False) -> List[float]:
+    """Choose robust display limits from finite samples in *data*."""
+
+    arr = np.asarray(data, dtype=float)
+    finite = arr[np.isfinite(arr)]
+    if finite.size == 0:
+        return [1e-6, 1.0] if positive else [0.0, 1.0]
+
+    lo = float(np.nanpercentile(finite, 5.0))
+    hi = float(np.nanpercentile(finite, 95.0))
+
+    if positive:
+        lo = max(lo, 1e-6)
+        hi = max(hi, lo * 1.05, 1e-3)
+    elif not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+        vmax = float(np.nanmax(np.abs(finite)))
+        if not np.isfinite(vmax) or vmax <= 0:
+            return [0.0, 1.0]
+        lo, hi = -vmax, vmax
+
+    return [lo, hi]
+
+
+def _parse_dopout(dopout_path: Union[Path, str]) -> DopplerOutput:
+    """Parse Spruit's ``dop.out`` output into structured NumPy arrays."""
+
+    path = Path(dopout_path)
+    with path.open(encoding="utf-8") as handle:
+        lines = handle.readlines()
+
+    if len(lines) < 2:
+        raise RuntimeError(f"{path} is incomplete: expected at least two header lines.")
+
+    try:
+        head0 = lines[0].split()
+        nph = int(head0[0])
+        nvp = int(head0[1])
+        nv_header = int(head0[2])
+        w0 = float(head0[3])
+        aa = float(head0[4])
+    except (IndexError, ValueError) as exc:
+        raise RuntimeError(f"Failed to parse the first header line of {path}.") from exc
+
+    try:
+        head1 = lines[1].split()
+        gamma = float(head1[0])
+    except (IndexError, ValueError) as exc:
+        raise RuntimeError(f"Failed to parse the second header line of {path}.") from exc
+
+    tokens = [
+        token.replace("D", "e").replace("E", "e")
+        for token in "".join(lines[2:]).split()
+    ]
+    index = 0
+
+    def take(count: int, label: str) -> List[str]:
+        nonlocal index
+        end = index + count
+        if end > len(tokens):
+            raise RuntimeError(f"{path} ended unexpectedly while reading {label}.")
+        chunk = tokens[index:end]
+        index = end
+        return chunk
+
+    def take_float_array(count: int, label: str) -> np.ndarray:
+        try:
+            return np.asarray([float(value) for value in take(count, label)], dtype=float)
+        except ValueError as exc:
+            raise RuntimeError(f"Failed to parse {label} in {path}.") from exc
+
+    pha = take_float_array(nph, "phase grid") / (2.0 * np.pi)
+    take(1, "phase-grid separator")
+    dpha = take_float_array(nph, "phase widths") / (2.0 * np.pi)
+    vp = take_float_array(nvp, "velocity grid")
+    if vp.size < 2:
+        raise RuntimeError(f"{path} must contain at least two velocity samples.")
+    dvp = vp[1] - vp[0]
+    vp = (vp - dvp / 2.0) / 1e5
+
+    dm = take_float_array(nvp * nph, "input trail").reshape(nvp, nph)
+
+    try:
+        params = take(14, "inversion parameters")
+        nv = int(params[11])
+    except (IndexError, ValueError) as exc:
+        raise RuntimeError(f"Failed to parse inversion parameters in {path}.") from exc
+
+    im = take_float_array(nv * nv, "Doppler map").reshape(nv, nv)
+    take(3, "reconstruction header")
+    dmr = take_float_array(nvp * nph, "reconstructed trail").reshape(nvp, nph)
+    take(4, "projection header")
+    dpx = take_float_array(nv * nv, "projection map").reshape(nv, nv)
+
+    if nv != nv_header:
+        LOGGER.debug(
+            "dop.out header nv=%s differs from payload nv=%s in %s", nv_header, nv, path
+        )
+
+    return DopplerOutput(
+        path=path,
+        nph=nph,
+        nvp=nvp,
+        nv=nv,
+        w0=w0,
+        aa=aa,
+        gamma=gamma,
+        pha=pha,
+        dpha=dpha,
+        vp=vp,
+        dm=dm,
+        im=im,
+        dmr=dmr,
+        dpx=dpx,
+    )
 
 
 def get_fortran_code_path():
@@ -361,9 +541,6 @@ class spruit:
         else:
             input_dpha = None
 
-        first_file = files[0]
-        first_path = list_dir / first_file
-
         def _read_spectrum(path: Path):
             arr = np.loadtxt(path, comments="#")
             if arr.ndim == 1:
@@ -405,13 +582,7 @@ class spruit:
                 wave = uniq_wave
             return wave, flux, err
 
-        try:
-            w1st, f1st, e1st = _read_spectrum(first_path)
-        except Exception as exc:  # pragma: no cover - numpy handles the heavy lifting
-            raise RuntimeError(f"Failed to read first spectrum '{first_path}': {exc}") from exc
-
-        wo = w1st
-        wave, flux = [], []
+        loaded = []
         flux_err: List[Optional[np.ndarray]] = []
 
         if getattr(self, "nbins", None) is None:
@@ -440,28 +611,54 @@ class spruit:
             except Exception as exc:
                 raise RuntimeError(f"Failed to read spectrum '{sp_path}': {exc}") from exc
 
-            if z == 0:
-                wave.append(wo)
-                flux.append(f1st)
-                flux_err.append(e1st)
-            else:
-                if wo[0] < w[0] or wo[-1] > w[-1]:
-                    raise ValueError(
-                        f"Spectrum '{sp_path}' wavelength coverage "
-                        f"[{w[0]:.6f}, {w[-1]:.6f}] does not cover reference grid "
-                        f"[{wo[0]:.6f}, {wo[-1]:.6f}]."
-                    )
-                wave.append(wo)
-                flux.append(np.interp(wo, w, f))
-                if e is None:
-                    flux_err.append(None)
-                else:
-                    flux_err.append(np.sqrt(np.interp(wo, w, np.square(e))))
+            loaded.append((fname, w, f, e))
 
             self._log(
                 logging.INFO,
                 f"{str(z + 1).zfill(3)} {fname}  {ph} {w.size}",
             )
+
+        overlap_min = float(max(w[0] for _, w, _, _ in loaded))
+        overlap_max = float(min(w[-1] for _, w, _, _ in loaded))
+        if overlap_min >= overlap_max:
+            raise ValueError(
+                "Input spectra do not share a common wavelength overlap. "
+                f"Latest starting wavelength: {overlap_min:.6f}; earliest ending "
+                f"wavelength: {overlap_max:.6f}."
+            )
+
+        overlap_counts = [
+            int(np.count_nonzero((w >= overlap_min) & (w <= overlap_max)))
+            for _, w, _, _ in loaded
+        ]
+        ref_index = int(np.argmax(overlap_counts))
+        ref_name, ref_wave, _, _ = loaded[ref_index]
+        ref_mask = (ref_wave >= overlap_min) & (ref_wave <= overlap_max)
+        wo = np.asarray(ref_wave[ref_mask], dtype=float)
+        if wo.size < 2:
+            raise ValueError(
+                "The common wavelength overlap contains fewer than two samples on the "
+                f"chosen reference grid ({ref_name})."
+            )
+
+        full_min = float(min(w[0] for _, w, _, _ in loaded))
+        full_max = float(max(w[-1] for _, w, _, _ in loaded))
+        if overlap_min > full_min or overlap_max < full_max:
+            self._log(
+                logging.INFO,
+                "Trimming spectra to common wavelength overlap "
+                f"[{overlap_min:.6f}, {overlap_max:.6f}] using reference grid '{ref_name}'.",
+            )
+
+        wave: List[np.ndarray] = []
+        flux: List[np.ndarray] = []
+        for _, w, f, e in loaded:
+            wave.append(wo)
+            flux.append(np.interp(wo, w, f))
+            if e is None:
+                flux_err.append(None)
+            else:
+                flux_err.append(np.sqrt(np.interp(wo, w, np.square(e))))
 
         self.wave = wave
         self.flux = flux
@@ -1359,84 +1556,46 @@ class spruit:
             if cmaps is None:
                 cmaps = plt.cm.Greys_r
 
-        if self.verbose:
-            print(">> Reading {} file".format(dopout))
         dopout_path = Path(dopout)
         if not dopout_path.is_absolute():
             dopout_path = self.workdir / dopout_path
-        fro=open(dopout_path,'r')
-        lines=fro.readlines()
-        fro.close()
+        self._log(logging.INFO, f">> Reading {dopout_path.name} file")
+        parsed = _parse_dopout(dopout_path)
+        self._log(logging.INFO, ">> Finished reading dop.out file")
 
-        #READ ALL FILES
-        nph,nvp,nv,w0,aa=int(lines[0].split()[0]),int(lines[0].split()[1]),int(lines[0].split()[2]),float(lines[0].split()[3]),float(lines[0].split()[4])
-        gamma,abso,atm,dirin=float(lines[1].split()[0]),lines[1].split()[1],lines[1].split()[2],lines[1].split()[3]
-
-
-
-
-        new = ''.join(lines[2:len(lines)])
-        new = new.replace("E",'e')
-        war = ''.join(new.splitlines()).split()
-        #print(war)
-        if self.verbose:
-            print(">> Finished reading dop.out file")
-        pha=np.array(war[:nph]).astype(float)/2.0/np.pi
-        dum1=war[nph]
-        dpha=np.array(war[nph+1:nph+1+nph]).astype(float)/2.0/np.pi
-        last=nph+1+nph
-        vp=np.array(war[last:last+nvp]).astype(float)
-        dvp=vp[1]-vp[0]
-        vp=vp-dvp/2.0
-        last=last+nvp
-        dm=np.array(war[last:last+nvp*nph]).astype(float)
-        dm=dm.reshape(nvp,nph)
-        last=last+nvp*nph
-
-
-        #print(war[last])
-        ih,iw,pb0,pb1,ns,ac,al,clim,norm,wid,af=int(war[last]),int(war[last+1]),float(war[last+2]),float(war[last+3]),int(war[last+4]),float(war[last+5]),float(war[last+6]),float(war[last+7]),int(war[last+8]),float(war[last+9]),float(war[last+10])
-        nv,va,dd=int(war[last+11]),float(war[last+12]),war[last+13]
-        last=last+14
-
-        im=np.array(war[last:last+nv*nv]).astype(float)
-        im=im.reshape(nv,nv)
-
-        last=last+nv*nv
-        ndum,dum2,dum3=int(war[last]),war[last+1],war[last+2]
-        last=last+3
-        dmr=np.array(war[last:last+nvp*nph]).astype(float)
-        dmr=dmr.reshape(nvp,nph)
-        last=last+nvp*nph
-        ndum,dum4,dum2,dum3=int(war[last]),int(war[last+1]),war[last+2],war[last+3]
-        last=last+4
-        dpx=np.array(war[last:last+nv*nv]).astype(float)
-        dpx=dpx.reshape(nv,nv)
-        dpx = np.array(dpx)
-        vp = np.array(vp)/1e5
-        data = im
-
-        data[data == 0.0] = np.nan
-
-        if np.all(np.isnan(data)):
+        data = np.asarray(parsed.im, dtype=float)
+        if not np.any(np.isfinite(data)):
             raise RuntimeError(f"No finite values found in {dopout_path}.")
 
-        data_min = np.nanmin(data)
-        data_max = np.nanmax(data)
-        span = data_max - data_min
-        if not np.isfinite(span) or span <= 0:
-            new_data = np.zeros_like(data, dtype=float)
-            if limits == None:
-                limits = [0.0, 1.0]
-        else:
-            new_data = (data - data_min) / span
-        #new_data = np.arcsinh(new_data)
-        if limits == None:
-            limits = [np.nanmax((new_data))*0.95,np.nanmax((new_data))*1.05]
-        if self.verbose:
-            print("Limits auto {:6.5f} {:6.5f}".format(np.nanmedian(data)*0.8,np.nanmedian(data)*1.2))
-            print("Limits user {:6.5f} {:6.5f}".format(limits[0],limits[1]))
-            print("Limits min={:6.5f}, max={:6.5f}".format(np.nanmin(data),np.nanmax(data)))
+        new_data = _normalise_to_unit_interval(data)
+        data_scaled = _scale_by_absmax(data)
+
+        mean_scaled = None
+        if remove_mean:
+            rad_prof = radial_profile(data, [data.shape[1] / 2 - corrx, data.shape[0] / 2 - corry])
+            meano = create_profile(
+                data,
+                rad_prof,
+                [data.shape[1] / 2 - corrx, data.shape[0] / 2 - corry],
+            )
+            mean_scaled = _scale_by_absmax(data - meano)
+
+        if limits is None:
+            if remove_mean and mean_scaled is not None:
+                if negative:
+                    limits = _auto_display_limits(np.abs(mean_scaled), positive=True)
+                else:
+                    limits = _auto_display_limits(mean_scaled, positive=False)
+            elif negative:
+                limits = _auto_display_limits(np.abs(data_scaled), positive=True)
+            else:
+                limits = _auto_display_limits(new_data, positive=True)
+
+        self._log(
+            logging.DEBUG,
+            "Map value range %.5f..%.5f with display limits %s"
+            % (float(np.nanmin(data)), float(np.nanmax(data)), limits),
+        )
         if not plot or plt is None:
             return None, new_data
 
@@ -1449,51 +1608,40 @@ class spruit:
         plt.clf()
         ax = fig.add_subplot(111)
         ax.minorticks_on()
-        ll = ~(np.isnan(data) )
-        #data[~ll] = np.nan
-        delvp = vp[1]-vp[0]
-        #print(">>> VP",min(vp),max(vp),delvp)
-        vpmin, vpmax = min(vp)-.5/delvp,max(vp)+.5/delvp,
+        delvp = parsed.vp[1] - parsed.vp[0]
+        vpmin = float(np.min(parsed.vp) - 0.5 / delvp)
+        vpmax = float(np.max(parsed.vp) + 0.5 / delvp)
 
         if smooth:
             interp_mode = 'gaussian'
         else:
             interp_mode = 'nearest'
-        if remove_mean:
-            rad_prof = radial_profile(data,[data[0].size/2-corrx,data[0].size/2-corry])
-            meano = create_profile(data,rad_prof,[data[0].size/2-corrx,data[0].size/2-corry])
-            qq = ~np.isnan(data - meano)
         if negative:
+            display = -mean_scaled if remove_mean and mean_scaled is not None else -data_scaled
             if remove_mean:
-                #print data[ll].max(),meano[qq].max()
-                img = plt.imshow((data - meano)/(data - meano)[qq].max(),
+                img = plt.imshow(display,
                     interpolation=interp_mode, cmap=cmap_plot,aspect='equal',
                     origin='lower',extent=(vpmin, vpmax,vpmin, vpmax ),
-                    vmin=limits[0],vmax=limits[1])
+                    vmin=-limits[1],vmax=-limits[0])
             else:
-                img = plt.imshow(-(data)/data[ll].max(),
+                img = plt.imshow(display,
                     interpolation=interp_mode, cmap=cmap_plot,aspect='equal',
                     origin='lower',extent=(vpmin, vpmax,vpmin, vpmax),
                     vmin=-limits[1],vmax=-limits[0] )
         else:
+            display = mean_scaled if remove_mean and mean_scaled is not None else new_data
             if remove_mean:
-                #print data[ll].max(),meano[qq].max()
-                img = plt.imshow((data - meano)/(data - meano)[qq].max(),
+                img = plt.imshow(display,
                     interpolation=interp_mode, cmap=cmap_plot,aspect='equal',
                     origin='lower',extent=(vpmin, vpmax,vpmin, vpmax),
                     vmin=limits[0],vmax=limits[1])
             else:
-                #print(np.nanmin(data),np.nanmax(data))
-                #new_data = (data - np.nanmin(data)) / (np.nanmax(data) - np.nanmin(data))
-                #new_data = data
-                #print(np.nanmedian(data),np.nanstd(data))
-                print("Limits min={:6.3f}, max={:6.3f}".format(np.nanmin(new_data),np.nanmax(new_data)))
-                img = plt.imshow(new_data,interpolation=interp_mode,
+                img = plt.imshow(display,interpolation=interp_mode,
                     cmap=cmap_plot,aspect='equal',origin='lower',
                     extent=(vpmin, vpmax,vpmin, vpmax ),
                     vmin=limits[0],vmax=limits[1] )
 
-        axlimits=[min(vp), max(vp),min(vp), max(vp) ]
+        axlimits=[float(np.min(parsed.vp)), float(np.max(parsed.vp)), float(np.min(parsed.vp)), float(np.max(parsed.vp)) ]
         plt.axis(axlimits)
         #plt.axvline(x=0.0,linestyle='--',color='white')
 
@@ -1584,69 +1732,12 @@ class spruit:
                 from .mynormalize import MyNormalize
 
         dopout_path = self.workdir / "dop.out"
-        fro=open(dopout_path,'r')
-        lines=fro.readlines()
-        fro.close()
-
-        #READ ALL FILES
-        nph,nvp,nv,w0,aa=int(lines[0].split()[0]),int(lines[0].split()[1]),int(lines[0].split()[2]),float(lines[0].split()[3]),float(lines[0].split()[4])
-        gamma,abso,atm,dirin=float(lines[1].split()[0]),lines[1].split()[1],lines[1].split()[2],lines[1].split()[3]
-
-        #print(">> Reading dop.out file")
-        #flag=0
-        #for i in np.arange(3,len(lines),1):
-        #    if flag==0:
-        #        temp=lines[i-1]+lines[i]
-        #        flag=1
-        #    else:
-        #        temp=temp+lines[i]
-        #        war=temp.split()
-        new = ''.join(lines[2:len(lines)])
-        new = new.replace("E",'e')
-        war = ''.join(new.splitlines()).split()
-        #print(war)
-        #print(">> Finished reading dop.out file")
-        pha=np.array(war[:nph]).astype(float)/2.0/np.pi
-        dum1=war[nph]
-        dpha=np.array(war[nph+1:nph+1+nph]).astype(float)/2.0/np.pi
-        last=nph+1+nph
-        vp=np.array(war[last:last+nvp]).astype(float)
-        dvp=vp[1]-vp[0]
-        vp=vp-dvp/2.0
-        last=last+nvp
-        dm=np.array(war[last:last+nvp*nph]).astype(float)
-        dm=dm.reshape(nvp,nph)
-        last=last+nvp*nph
-
-
-        #print(war[last])
-        ih,iw,pb0,pb1,ns,ac,al,clim,norm,wid,af=int(war[last]),int(war[last+1]),float(war[last+2]),float(war[last+3]),int(war[last+4]),float(war[last+5]),float(war[last+6]),float(war[last+7]),int(war[last+8]),float(war[last+9]),float(war[last+10])
-        nv,va,dd=int(war[last+11]),float(war[last+12]),war[last+13]
-        last=last+14
-
-        im=np.array(war[last:last+nv*nv]).astype(float)
-        im=im.reshape(nv,nv)
-
-        last=last+nv*nv
-        ndum,dum2,dum3=int(war[last]),war[last+1],war[last+2]
-        last=last+3
-        dmr=np.array(war[last:last+nvp*nph]).astype(float)
-        dmr=dmr.reshape(nvp,nph)
-        last=last+nvp*nph
-        ndum,dum4,dum2,dum3=int(war[last]),int(war[last+1]),war[last+2],war[last+3]
-        last=last+4
-        dpx=np.array(war[last:last+nv*nv]).astype(float)
-        dpx=dpx.reshape(nv,nv)
-        dpx = np.array(dpx)
-        vp = np.array(vp)/1e5
-        data = im
-
-        data[data <= 0.0] = np.nan
-        dpx[dpx <= 0.0] = np.nan
-        #dmr[dmr <= 0.0] = np.nan
-        #dm[dm <= 0.0] = np.nan
-        #print(pha)
-        #print(self.nbins)
+        parsed = _parse_dopout(dopout_path)
+        pha = parsed.pha
+        dpha = parsed.dpha
+        vp = parsed.vp
+        dm = np.asarray(parsed.dm, dtype=float)
+        dmr = np.asarray(parsed.dmr, dtype=float)
         if not plot or plt is None:
             return None, None, dmr, dm
 
@@ -1655,14 +1746,19 @@ class spruit:
 
         trail_dmr,phase = rebin_trail(vp, dmr.T, pha, self.nbins, dpha,
                                     rebin_wave=None)
+        trail_dm_norm = _scale_by_absmax(trail_dm)
+        trail_dmr_norm = _scale_by_absmax(trail_dmr)
 
-        delvp = vp[1]-vp[0]
         x1_lim = min(vp)
         x2_lim = max(vp)
-        #print(phase)
         if limits == None:
-            limits = [np.median(dmr/np.nanmax(dmr))*0.8,
-                      np.median(dmr/np.nanmax(dmr))*1.2]
+            both = np.concatenate(
+                [
+                    trail_dm_norm[np.isfinite(trail_dm_norm)],
+                    trail_dmr_norm[np.isfinite(trail_dmr_norm)],
+                ]
+            )
+            limits = _auto_display_limits(both, positive=False)
 
         # Now lets do the plotting
         cmap_plot = cmaps.copy() if hasattr(cmaps, "copy") else cmaps
@@ -1672,7 +1768,7 @@ class spruit:
         figor = plt.figure('Reconstruction',figsize=(10,8))
         plt.clf()
         ax1 = figor.add_subplot(121)
-        print(np.nanmax(trail_dm))
+        self._log(logging.DEBUG, f"Original trail value range {limits}")
         norm_dm = None
         if colorbar:
             norm_dm = MyNormalize(vmin=limits[0], vmax=limits[1], stretch='linear')
@@ -1688,7 +1784,7 @@ class spruit:
             imshow_kwargs["vmax"] = limits[1]
         else:
             imshow_kwargs["norm"] = norm_dm
-        imgo = plt.imshow(trail_dm.T/np.nanmax(trail_dm), **imshow_kwargs)
+        imgo = plt.imshow(trail_dm_norm.T, **imshow_kwargs)
 
         ax1.set_xlabel('Velocity / km s$^{-1}$')
         ax1.set_ylabel('Orbital Phase')
@@ -1702,7 +1798,6 @@ class spruit:
         else:
             cbar2=1
         ax2 = figor.add_subplot(122)
-        print(np.nanmax(trail_dmr))
         norm_dmr = None
         if colorbar:
             norm_dmr = MyNormalize(vmin=limits[0], vmax=limits[1], stretch='linear')
@@ -1718,7 +1813,7 @@ class spruit:
             imshow_kwargs["vmax"] = limits[1]
         else:
             imshow_kwargs["norm"] = norm_dmr
-        imgo = plt.imshow(trail_dmr.T/np.nanmax(trail_dmr), **imshow_kwargs)
+        imgo = plt.imshow(trail_dmr_norm.T, **imshow_kwargs)
         ax2.set_xlabel('Velocity / km s$^{-1}$')
         ax2.set_yticklabels([])
         if colorbar:
