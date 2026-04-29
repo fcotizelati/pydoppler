@@ -37,3 +37,35 @@ def test_foldspec_reads_optional_error_column(tmp_path: Path):
     assert len(dop.flux_err) == 2
     assert all(err is not None for err in dop.flux_err)
     assert np.asarray(dop.flux_err[0]).shape == wave.shape
+
+
+def test_foldspec_combines_duplicate_wavelength_errors_as_mean_uncertainty(
+    tmp_path: Path,
+):
+    data_dir = tmp_path / "dataset"
+    data_dir.mkdir()
+
+    arr = np.array(
+        [
+            [6500.0, 1.0, 0.2],
+            [6500.0, 3.0, 0.2],
+            [6501.0, 5.0, 0.4],
+        ]
+    )
+    np.savetxt(data_dir / "spec1.txt", arr)
+    np.savetxt(data_dir / "spec2.txt", arr)
+    (data_dir / "phases.txt").write_text(
+        "spec1.txt 0.1\nspec2.txt 0.6\n",
+        encoding="utf-8",
+    )
+
+    dop = pydoppler.spruit(auto_install=False, workdir=tmp_path / "workdir")
+    dop.base_dir = str(data_dir)
+    dop.list = "phases.txt"
+    dop.Foldspec()
+
+    err = np.asarray(dop.flux_err[0])
+
+    assert np.allclose(dop.wave[0], [6500.0, 6501.0])
+    assert np.allclose(dop.flux[0], [2.0, 5.0])
+    assert err[0] == np.sqrt(0.2**2 + 0.2**2) / 2.0

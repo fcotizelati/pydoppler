@@ -24,6 +24,7 @@ def _write_mock_dopout(
     im: np.ndarray,
     dm: Optional[np.ndarray] = None,
     dmr: Optional[np.ndarray] = None,
+    vp: Optional[np.ndarray] = None,
 ) -> None:
     im = np.asarray(im, dtype=float)
     nv = int(im.shape[0])
@@ -40,7 +41,9 @@ def _write_mock_dopout(
 
     pha = np.array([0.0, np.pi], dtype=float)
     dpha = np.array([0.1, 0.1], dtype=float) * 2.0 * np.pi
-    vp = np.array([1.0e5, 2.0e5, 3.0e5], dtype=float)
+    if vp is None:
+        vp = np.array([1.0e5, 2.0e5, 3.0e5], dtype=float)
+    vp = np.asarray(vp, dtype=float)
     params = f"0 0 0.0 1.0 7 1e-4 1.0 1.0 1 1.0 0.0 {nv} 0.0 0"
 
     payload = " ".join(
@@ -129,6 +132,28 @@ def test_dopmap_handles_flat_zero_map(tmp_path: Path):
 
     assert data.shape == (4, 4)
     assert np.allclose(data, 0.0)
+
+
+def test_dopmap_plot_extent_uses_half_velocity_bin_width(tmp_path: Path):
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+    import matplotlib.pyplot as plt
+
+    workdir = tmp_path
+    _write_mock_dopout(
+        workdir / "dop.out",
+        im=np.ones((4, 4), dtype=float),
+        vp=np.array([1.0e5, 4.0e5, 7.0e5], dtype=float),
+    )
+
+    dop = pydoppler.spruit(auto_install=False, interactive=False, workdir=workdir)
+    dop.Dopmap(plot=True, colorbar=False, show=False)
+
+    extent = plt.gca().images[0].get_extent()
+
+    assert extent == pytest.approx([-2.0, 7.0, -2.0, 7.0])
+    plt.close("all")
 
 
 def test_scale_by_absmax_handles_zero_input():

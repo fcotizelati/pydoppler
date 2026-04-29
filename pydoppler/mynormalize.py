@@ -88,10 +88,7 @@ class MyNormalize(Normalize):
 
     def __call__(self, value, clip=None):
 
-        #read in parameters
-        method = self.stretch
         exponent = self.exponent
-        midpoint = self.midpoint
 
         # ORIGINAL MATPLOTLIB CODE
 

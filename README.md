@@ -31,7 +31,8 @@
   At the moment, only gfortran is supported.
 
 
-  Python >=3.8 is required.
+  Python >=3.8 is required. The package is tested through Python 3.14; the
+  Fortran-backed tomography workflow also requires ``make`` and ``gfortran``.
 
   You can download and install PyDoppler via pip. In a terminal command line, just type:
 
@@ -89,6 +90,34 @@
   normalisation step can run in headless or automated environments. Informational output is
   routed through Python's :mod:`logging` module; configure it to surface diagnostics that were
   previously printed to stdout.
+
+  ### Scope and physical conventions
+
+  PyDoppler is a lightweight wrapper around Spruit's classic two-dimensional
+  maximum-entropy Doppler tomography code. It is appropriate for single-line,
+  phase-resolved spectroscopy when the usual assumptions of classical Doppler
+  tomography are adequate:
+
+  * the emitting pattern is fixed in the binary co-rotating frame during the
+    observations;
+  * velocities are interpreted in the orbital plane of the binary;
+  * the ephemeris, systemic velocity, and line rest wavelength are supplied by
+    the user and dominate the physical interpretation;
+  * continuum subtraction and line-window selection are part of the scientific
+    model, not just plotting choices.
+
+  Input wavelengths are assumed to be in Angstrom. ``dop.gama`` is the systemic
+  velocity in km/s; positive values are treated as a redshift and removed from
+  the wavelength grid before the velocity-space input file is written. The
+  Python plotting API reports velocities in km/s, while the Fortran input file
+  uses cm/s internally. Orbital phases are in cycles, and an optional third
+  column in the phase file can supply each exposure width in phase units.
+
+  This is not a full state-of-the-art tomography framework. It does not perform
+  modulation tomography, 3D tomography, multi-line joint modelling, Bayesian
+  uncertainty propagation, or automated ephemeris/system-parameter inference.
+  Use residuals, reconstructed trails, phase coverage, and simulations to check
+  whether a map feature is demanded by the data.
 
   ##  Section 2: How to load data
 

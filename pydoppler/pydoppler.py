@@ -578,7 +578,7 @@ class spruit:
                 flux = flux_sum / counts
                 if err is not None:
                     err2_sum = np.bincount(inv, weights=np.square(err))
-                    err = np.sqrt(err2_sum / counts)
+                    err = np.sqrt(err2_sum) / counts
                 wave = uniq_wave
             return wave, flux, err
 
@@ -1609,8 +1609,8 @@ class spruit:
         ax = fig.add_subplot(111)
         ax.minorticks_on()
         delvp = parsed.vp[1] - parsed.vp[0]
-        vpmin = float(np.min(parsed.vp) - 0.5 / delvp)
-        vpmax = float(np.max(parsed.vp) + 0.5 / delvp)
+        vpmin = float(np.min(parsed.vp) - 0.5 * delvp)
+        vpmax = float(np.max(parsed.vp) + 0.5 * delvp)
 
         if smooth:
             interp_mode = 'gaussian'
@@ -2068,7 +2068,7 @@ class DraggableColorbar(object):
         elif event.key=='up':
             self.index -= 1
         if self.index<0:
-            self.index = len(self.cycle)
+            self.index = len(self.cycle) - 1
         elif self.index>=len(self.cycle):
             self.index = 0
         cmap = self.cycle[self.index]
