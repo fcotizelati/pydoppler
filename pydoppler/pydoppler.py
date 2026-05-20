@@ -164,6 +164,15 @@ def _auto_display_limits(data: np.ndarray, *, positive: bool = False) -> List[fl
     return [lo, hi]
 
 
+def _set_mappable_norm(mappable, norm) -> None:
+    """Apply a Matplotlib norm to a mappable across Matplotlib versions."""
+
+    if hasattr(mappable, "set_norm"):
+        mappable.set_norm(norm)
+    else:  # pragma: no cover - defensive fallback for unusual mappables
+        mappable.norm = norm
+
+
 def _parse_dopout(dopout_path: Union[Path, str]) -> DopplerOutput:
     """Parse Spruit's ``dop.out`` output into structured NumPy arrays."""
 
@@ -1650,11 +1659,15 @@ class spruit:
         if colorbar:
             from .mynormalize import MyNormalize
 
+            norm_limits = (-limits[1], -limits[0]) if negative else (limits[0], limits[1])
+            stretch = 'log' if norm_limits[0] > 0 else 'linear'
+            _set_mappable_norm(
+                img,
+                MyNormalize(vmin=norm_limits[0], vmax=norm_limits[1], stretch=stretch),
+            )
             cbar = plt.colorbar(format='%.1f',orientation='vertical',
                                 fraction=0.046, pad=0.04)
             cbar.set_label('Normalised Flux')
-            cbar.set_norm(MyNormalize(vmin=limits[0],vmax=limits[1],
-                                                  stretch='log'))
             cbar = DraggableColorbar(cbar,img)
             cbar.connect()
         else:
@@ -2095,14 +2108,14 @@ class DraggableColorbar(object):
         elif event.button==3:
             self.cbar.norm.vmin -= (perc*scale)*np.sign(dy)
             self.cbar.norm.vmax += (perc*scale)*np.sign(dy)
-        self.mappable.set_norm(self.cbar.norm)
+        _set_mappable_norm(self.mappable, self.cbar.norm)
         self._refresh()
 
 
     def on_release(self, event):
         """on release we reset the press data"""
         self.press = None
-        self.mappable.set_norm(self.cbar.norm)
+        _set_mappable_norm(self.mappable, self.cbar.norm)
         self._refresh()
 
     def disconnect(self):

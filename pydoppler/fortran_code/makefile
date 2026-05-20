@@ -21,7 +21,12 @@
 #compile=cp -f cclock.f clock.f ; g77 -O -fno-globals -Wno-globals
 #-fno-globals
 
-compile=cp -f cclock.f clock.f ; gfortran -O -w -fallow-argument-mismatch 
+FC = gfortran
+FFLAGS = -O -w
+GFORTRAN_MAJOR := $(shell $(FC) -dumpversion 2>/dev/null | sed 's/\..*//')
+ALLOW_ARGUMENT_MISMATCH ?= $(shell if [ "$(GFORTRAN_MAJOR)" -ge 10 ] 2>/dev/null; then echo -fallow-argument-mismatch; fi)
+
+compile=cp -f cclock.f clock.f ; $(FC) $(FFLAGS) $(ALLOW_ARGUMENT_MISMATCH)
 
 dop.out: dopin dop.in dopp
 	./dopp

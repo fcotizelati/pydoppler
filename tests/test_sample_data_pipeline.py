@@ -156,6 +156,33 @@ def test_dopmap_plot_extent_uses_half_velocity_bin_width(tmp_path: Path):
     plt.close("all")
 
 
+def test_dopmap_interactive_colorbar_sets_norm_on_mappable(tmp_path: Path):
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+    import matplotlib.pyplot as plt
+
+    workdir = tmp_path
+    _write_mock_dopout(
+        workdir / "dop.out",
+        im=np.arange(1, 17, dtype=float).reshape(4, 4),
+    )
+
+    dop = pydoppler.spruit(auto_install=False, interactive=False, workdir=workdir)
+    cbar, data = dop.Dopmap(
+        plot=True,
+        colorbar=True,
+        show=False,
+        limits=[1e-3, 1.0],
+    )
+
+    assert data.shape == (4, 4)
+    assert cbar.mappable.norm is cbar.cbar.norm
+    assert cbar.cbar.norm.vmin == pytest.approx(1e-3)
+    assert cbar.cbar.norm.vmax == pytest.approx(1.0)
+    plt.close("all")
+
+
 def test_scale_by_absmax_handles_zero_input():
     scaled = pydoppler_module._scale_by_absmax(np.zeros((4, 4), dtype=float))
 

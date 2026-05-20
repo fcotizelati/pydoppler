@@ -24,6 +24,18 @@ def test_copy_fortran_code_respects_overwrite(tmp_path: Path):
     assert dop_f.read_text(encoding="utf-8") != "dummy"
 
 
+def test_fortran_makefile_keeps_gfortran_argument_mismatch_flag_optional(tmp_path: Path):
+    pydoppler.copy_fortran_code(tmp_path)
+
+    makefile = (tmp_path / "makefile").read_text(encoding="utf-8")
+
+    assert "FC = gfortran" in makefile
+    assert "FFLAGS = -O -w" in makefile
+    assert "ALLOW_ARGUMENT_MISMATCH ?=" in makefile
+    assert "compile=cp -f cclock.f clock.f ; $(FC) $(FFLAGS) $(ALLOW_ARGUMENT_MISMATCH)" in makefile
+    assert "gfortran -O -w -fallow-argument-mismatch" not in makefile
+
+
 def test_install_sample_script_avoids_overwrite(tmp_path: Path):
     first = pydoppler.install_sample_script(tmp_path)
     assert first.name == "sample_script.py"
@@ -41,4 +53,3 @@ def test_copy_test_data_copies_dataset(tmp_path: Path):
     assert (tmp_path / "ugem99" / "ugem0all.fas").is_file()
     assert (tmp_path / "output_images" / "Doppler_Map.png").is_file()
     assert all(path.is_file() for path in copied)
-
