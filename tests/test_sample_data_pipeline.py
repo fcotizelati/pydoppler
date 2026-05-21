@@ -153,6 +153,7 @@ def test_dopmap_plot_extent_uses_half_velocity_bin_width(tmp_path: Path):
     extent = plt.gca().images[0].get_extent()
 
     assert extent == pytest.approx([-2.0, 7.0, -2.0, 7.0])
+    assert plt.gca().images[0].get_cmap().name == "magma"
     plt.close("all")
 
 
@@ -160,6 +161,7 @@ def test_dopmap_interactive_colorbar_sets_norm_on_mappable(tmp_path: Path):
     import matplotlib
 
     matplotlib.use("Agg", force=True)
+    from matplotlib.colors import Normalize
     import matplotlib.pyplot as plt
 
     workdir = tmp_path
@@ -178,8 +180,43 @@ def test_dopmap_interactive_colorbar_sets_norm_on_mappable(tmp_path: Path):
 
     assert data.shape == (4, 4)
     assert cbar.mappable.norm is cbar.cbar.norm
+    assert type(cbar.cbar.norm) is Normalize
     assert cbar.cbar.norm.vmin == pytest.approx(1e-3)
     assert cbar.cbar.norm.vmax == pytest.approx(1.0)
+    plt.close("all")
+
+
+def test_reco_colorbars_use_decimal_labels_and_full_panel_height(tmp_path: Path):
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+    import matplotlib.pyplot as plt
+
+    dm = np.array([[0.1, 0.2], [0.4, 0.5], [0.8, 0.9]], dtype=float)
+    dmr = np.array([[0.2, 0.1], [0.5, 0.4], [0.9, 0.8]], dtype=float)
+    _write_mock_dopout(tmp_path / "dop.out", im=np.ones((4, 4), dtype=float), dm=dm, dmr=dmr)
+
+    dop = pydoppler.spruit(auto_install=False, interactive=False, workdir=tmp_path)
+    cbar_data, cbar_model, _, _ = dop.Reco(
+        plot=True,
+        colorbar=True,
+        show=False,
+        limits=[0.05, 0.95],
+    )
+
+    fig = plt.figure("Reconstruction")
+    fig.canvas.draw()
+    for wrapped_cbar in (cbar_data, cbar_model):
+        tick_labels = [tick.get_text() for tick in wrapped_cbar.cbar.ax.get_yticklabels()]
+        assert tick_labels
+        assert all("e" not in label.lower() for label in tick_labels)
+        assert all("\\times" not in label for label in tick_labels)
+
+        panel_box = wrapped_cbar.mappable.axes.get_position()
+        cbar_box = wrapped_cbar.cbar.ax.get_position()
+        assert cbar_box.y0 == pytest.approx(panel_box.y0, abs=1e-2)
+        assert cbar_box.y1 == pytest.approx(panel_box.y1, abs=1e-2)
+
     plt.close("all")
 
 

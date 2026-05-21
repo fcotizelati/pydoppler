@@ -823,11 +823,15 @@ class spruit:
 
 
         avgspec=np.sum(self.flux,axis=0)
-        if plot and plt is not None:
-            fig=plt.figure(num="Average Spec",figsize=(6.57,8.57))
+        continuum_fig = None
+        continuum_ax = None
+        if plot and plt is not None and self.interactive and not continnum_band:
+            continuum_fig = plt.figure(num="Continuum Selection", figsize=(6.57, 4.0))
             plt.clf()
-            ax=fig.add_subplot(211)
-            plt.plot(self.wave[0],avgspec/len(self.pha))
+            continuum_ax = continuum_fig.add_subplot(111)
+            continuum_ax.plot(self.wave[0], avgspec / len(self.pha))
+            continuum_ax.set_xlabel(r'Wavelength / $\AA$')
+            continuum_ax.set_ylabel('Input flux')
 
         if not continnum_band:
             if self.interactive:
@@ -846,9 +850,9 @@ class spruit:
                     if not selection:
                         raise RuntimeError("Continuum selection aborted by user.")
                     xor.append(float(selection[0][0]))
-                    if plot:
-                        plt.axvline(x=xor[-1],linestyle='--',color='k')
-                        plt.draw()
+                    if continuum_ax is not None and continuum_fig is not None:
+                        continuum_ax.axvline(x=xor[-1], linestyle='--', color='k')
+                        continuum_fig.canvas.draw_idle()
             else:
                 xor=list(self._auto_continuum_band())
                 message = (
@@ -856,20 +860,20 @@ class spruit:
                     f"[{xor[0]:.2f}, {xor[1]:.2f}] and [{xor[2]:.2f}, {xor[3]:.2f}] Å."
                 )
                 log(logging.INFO, message)
-                if plot and plt is not None:
+                if continuum_ax is not None:
                     for idx,val in enumerate(xor):
                         label='Cont Bands' if idx == 0 else ''
-                        plt.axvline(x=val,linestyle='--',color='k',label=label)
+                        continuum_ax.axvline(x=val, linestyle='--', color='k', label=label)
         else:
             xor=[float(v) for v in continnum_band]
             if len(xor) != 4:
                 raise ValueError("continuum_band must contain four wavelength limits.")
             if xor[0] >= xor[1] or xor[2] >= xor[3]:
                 raise ValueError("Each continuum interval must be strictly increasing.")
-            if plot and plt is not None:
+            if continuum_ax is not None:
                 for idx,val in enumerate(xor):
                     label='Cont Bands' if idx == 0 else ''
-                    plt.axvline(x=val,linestyle='--',color='k',label=label)
+                    continuum_ax.axvline(x=val, linestyle='--', color='k', label=label)
         lop = ((self.wave[0]>xor[0]) * (self.wave[0]<xor[1])) + ((self.wave[0]>xor[2]) * (self.wave[0]<xor[3]))
         n_cont = int(np.count_nonzero(lop))
         min_cont = max(poly_degree + 1, 3)
@@ -879,37 +883,15 @@ class spruit:
                 f"are required for a degree-{poly_degree} polynomial fit."
             )
         yor=avgspec[lop]/len(self.pha)
-        if plot and plt is not None:
-            plt.ylim(avgspec[lop].min()/len(self.pha)*0.8,avgspec.max()/len(self.pha)*1.1)
+        if continuum_ax is not None:
+            continuum_ax.set_ylim(avgspec[lop].min()/len(self.pha)*0.8,avgspec.max()/len(self.pha)*1.1)
             z = np.polyfit(self.wave[0][lop], yor, poly_degree)
             pz = np.poly1d(z)
             linfit = pz(self.wave[0])
-            plt.plot(self.wave[0],linfit,'r',label='Cont Fit')
-            lg = plt.legend(fontsize=14)
-            plt.xlim(xor[0]-10,xor[3]+10)
-            plt.xlabel(r'Wavelength / $\AA$')
-            plt.ylabel('Input flux')
-
-
-        if plot and plt is not None:
-            ax=fig.add_subplot(212)
-            vell=((self.wave[0]/self.lam0)**2-1)*cl/(1+(self.wave[0]/self.lam0)**2)
-
-            plt.plot(vell,avgspec/len(self.pha)-linfit,'k')
-            plt.axhline(y=0,linestyle='--',color='k')
-            plt.axvline(x=-self.delw/self.lam0*cl,linestyle='-',color='DarkOrange')
-            plt.axvline(x= self.delw/self.lam0*cl,linestyle='-',
-                        color='DarkOrange',label='DopMap limits')
-            lg = plt.legend(fontsize=14)
-            plt.xlim(-self.delw/self.lam0*cl*1.5,self.delw/self.lam0*cl*1.5)
-            qq = (np.abs(vell) < self.delw/self.lam0*cl*1.5)
-            plt.ylim(-0.05*np.max(avgspec[qq]/len(self.pha)-linfit[qq] -1.0),
-                    np.max(avgspec[qq]/len(self.pha)-linfit[qq] -1.0)*1.1)
-            plt.xlabel('Velocity km/s')
-            plt.ylabel('Bkg subtracted Flux')
-            if self.plot:
-                plt.draw()
-            plt.tight_layout()
+            continuum_ax.plot(self.wave[0], linfit, 'r', label='Cont Fit')
+            continuum_ax.legend(fontsize=10)
+            continuum_ax.set_xlim(xor[0]-10, xor[3]+10)
+            continuum_fig.tight_layout()
 
         ######## Do individual fit on the blaze
         err_input = None
@@ -1218,75 +1200,61 @@ class spruit:
         trail /= tots
         """
 
-        if plot_median:
-            si = 0
-            lo = 2
-        else:
-            si = 2
-            lo = 0
-
-        plt.figure('Trail',figsize=(6.57,8.57))
-        plt.clf()
-        if plot_median:
-            ax1 = plt.subplot2grid((6, 1), (0, 0), rowspan=2)
-            ax1.minorticks_on()
-            if rebin_wave ==0:
-                plt.plot(waver,np.nanmedian(self.normalised_flux,axis=0)[rr],
-                    label='Median',color='#8e44ad')
-            else:
-                log(logging.DEBUG, str(dw))
-                new_med = np.interp(waver, self.normalised_wave[rr],
-                                    np.nanmedian(self.normalised_flux,axis=0)[rr])
-                plt.plot(waver,np.nanmedian(self.normalised_flux,axis=0)[rr],
-                    label='Median',color='k',alpha=1)
-                plt.plot(waver,new_med,
-                    label='Median',color='#8e44ad',alpha=1)
-            plt.axhline(y=0,ls='--',color='r',alpha=0.7)
-            ax1.set_xticklabels([])
-
-            #plt.xlim(self.lam0 - self.delw, self.lam0 + self.delw)
-            plt.ylim(-0.05,np.nanmax(np.nanmedian(self.normalised_flux,
-                                                  axis=0)[rr])*1.1)
-
-        ax2 = plt.subplot2grid((6, 1), (lo, 0), rowspan=4+si)
-        ax2.minorticks_on()
         if vel_space:
             x1_lim = float(np.nanmin(self.vell))
             x2_lim = float(np.nanmax(self.vell))
-            trail_cmap = plt.cm.binary.copy() if hasattr(plt.cm.binary, "copy") else plt.cm.binary
-            if hasattr(trail_cmap, "set_bad"):
-                trail_cmap.set_bad(color="0.85")
-            img = plt.imshow(
-                trail.T, interpolation='nearest', cmap=trail_cmap, aspect='auto',
-                origin='lower', extent=(x1_lim, x2_lim, phase[0], phase[-1] + phase_pad)
-            )
-            plt.xlim(x1_lim, x2_lim)
-            plt.xlabel('Velocity / km s$^{-1}$')
-            plt.axvline(x=0.0, ls='--', color='DarkOrange')  # center of the line in velocity space
+            profile_x = self.vell
+            display_xlim = (x1_lim, x2_lim)
+            xlabel = 'Velocity / km s$^{-1}$'
+            center = 0.0
         else:
             x1_lim = float(np.nanmin(self.normalised_wave))
             x2_lim = float(np.nanmax(self.normalised_wave))
-            trail_cmap = plt.cm.binary.copy() if hasattr(plt.cm.binary, "copy") else plt.cm.binary
-            if hasattr(trail_cmap, "set_bad"):
-                trail_cmap.set_bad(color="0.85")
-            img = plt.imshow(
-                trail.T, interpolation='nearest', cmap=trail_cmap, aspect='auto',
-                origin='lower', extent=(x1_lim, x2_lim, phase[0], phase[-1] + phase_pad)
-            )
-            plt.xlim(self.lam0 - self.delw, self.lam0 + self.delw)
-            plt.xlabel('Wavelength / $\\AA$')
-            plt.axvline(x=self.lam0, ls='--', color='DarkOrange')
-                  
+            profile_x = self.normalised_wave
+            display_xlim = (self.lam0 - self.delw, self.lam0 + self.delw)
+            xlabel = 'Wavelength / $\\AA$'
+            center = self.lam0
+
+        fig = plt.figure('Trail',figsize=(6.57,8.57))
+        plt.clf()
+        ax1 = plt.subplot2grid((6, 1), (0, 0), rowspan=2)
+        ax1.minorticks_on()
+        profile = (
+            np.nanmedian(self.normalised_flux, axis=0)
+            if plot_median
+            else np.nanmean(self.normalised_flux, axis=0)
+        )
+        profile_mask = rr if rr.shape == profile.shape else np.ones(profile.shape, dtype=bool)
+        ax1.plot(profile_x[profile_mask], profile[profile_mask], color='k')
+        ax1.axhline(y=0, ls='--', color='k', alpha=0.7)
+        ax1.axvline(x=center, ls='--', color='DarkOrange')
+        ax1.set_xlim(*display_xlim)
+        ax1.set_ylabel('Bkg subtracted Flux')
+        ax1.set_xticklabels([])
+
+        ax2 = plt.subplot2grid((6, 1), (2, 0), rowspan=4)
+        ax2.minorticks_on()
+        trail_cmap = plt.cm.binary.copy() if hasattr(plt.cm.binary, "copy") else plt.cm.binary
+        if hasattr(trail_cmap, "set_bad"):
+            trail_cmap.set_bad(color="0.85")
+        img = ax2.imshow(
+            trail.T, interpolation='nearest', cmap=trail_cmap, aspect='auto',
+            origin='lower', extent=(x1_lim, x2_lim, phase[0], phase[-1] + phase_pad)
+        )
+        ax2.set_xlim(*display_xlim)
+        ax2.set_xlabel(xlabel)
+        ax2.axvline(x=center, ls='--', color='DarkOrange')
+
         if rebin:
             if two_orbits:
                 lim_two = 2
             else:
                 lim_two = 1
-            plt.ylim(phase[0], lim_two + 1 / self.nbins / 2.0)
+            ax2.set_ylim(phase[0], lim_two + 1 / self.nbins / 2.0)
         else:
-            plt.ylim(phase[0], phase[-1] + phase_pad / 2.0)
-        plt.ylabel('Orbital Phase')
-        plt.tight_layout(h_pad=0)
+            ax2.set_ylim(phase[0], phase[-1] + phase_pad / 2.0)
+        ax2.set_ylabel('Orbital Phase')
+        fig.tight_layout(h_pad=0)
         if show:
             plt.show()
 
@@ -1563,7 +1531,7 @@ class spruit:
         if plot:
             _, plt = _lazy_import_matplotlib_pyplot()
             if cmaps is None:
-                cmaps = plt.cm.Greys_r
+                cmaps = plt.cm.magma
 
         dopout_path = Path(dopout)
         if not dopout_path.is_absolute():
@@ -1657,13 +1625,12 @@ class spruit:
         plt.xlabel('V$_x$ / km s$^{-1}$')
         plt.ylabel('V$_y$ / km s$^{-1}$')
         if colorbar:
-            from .mynormalize import MyNormalize
+            from matplotlib.colors import Normalize
 
             norm_limits = (-limits[1], -limits[0]) if negative else (limits[0], limits[1])
-            stretch = 'log' if norm_limits[0] > 0 else 'linear'
             _set_mappable_norm(
                 img,
-                MyNormalize(vmin=norm_limits[0], vmax=norm_limits[1], stretch=stretch),
+                Normalize(vmin=norm_limits[0], vmax=norm_limits[1]),
             )
             cbar = plt.colorbar(format='%.1f',orientation='vertical',
                                 fraction=0.046, pad=0.04)
@@ -1742,7 +1709,9 @@ class spruit:
             if cmaps is None:
                 cmaps = plt.cm.binary
             if colorbar:
-                from .mynormalize import MyNormalize
+                from matplotlib.colors import Normalize
+                from matplotlib.ticker import FormatStrFormatter
+                from mpl_toolkits.axes_grid1 import make_axes_locatable
 
         dopout_path = self.workdir / "dop.out"
         parsed = _parse_dopout(dopout_path)
@@ -1784,7 +1753,7 @@ class spruit:
         self._log(logging.DEBUG, f"Original trail value range {limits}")
         norm_dm = None
         if colorbar:
-            norm_dm = MyNormalize(vmin=limits[0], vmax=limits[1], stretch='linear')
+            norm_dm = Normalize(vmin=limits[0], vmax=limits[1])
         imshow_kwargs = dict(
             interpolation='nearest',
             cmap=cmap_plot,
@@ -1803,8 +1772,14 @@ class spruit:
         ax1.set_ylabel('Orbital Phase')
 
         if colorbar:
-            cbar2 = plt.colorbar(format='%.1e',orientation='vertical',
-                                fraction=0.046, pad=0.04)
+            divider1 = make_axes_locatable(ax1)
+            cax1 = divider1.append_axes("right", size="5%", pad=0.08)
+            cbar2 = figor.colorbar(
+                imgo,
+                cax=cax1,
+                orientation='vertical',
+                format=FormatStrFormatter('%.2f'),
+            )
             cbar2.set_label('Normalised Flux')
             cbar2 = DraggableColorbar(cbar2,imgo)
             cbar2.connect()
@@ -1813,7 +1788,7 @@ class spruit:
         ax2 = figor.add_subplot(122)
         norm_dmr = None
         if colorbar:
-            norm_dmr = MyNormalize(vmin=limits[0], vmax=limits[1], stretch='linear')
+            norm_dmr = Normalize(vmin=limits[0], vmax=limits[1])
         imshow_kwargs = dict(
             interpolation='nearest',
             cmap=cmap_plot,
@@ -1830,8 +1805,14 @@ class spruit:
         ax2.set_xlabel('Velocity / km s$^{-1}$')
         ax2.set_yticklabels([])
         if colorbar:
-            cbar3 = plt.colorbar(format='%.1e',orientation='vertical',
-                                fraction=0.046, pad=0.04)
+            divider2 = make_axes_locatable(ax2)
+            cax2 = divider2.append_axes("right", size="5%", pad=0.08)
+            cbar3 = figor.colorbar(
+                imgo,
+                cax=cax2,
+                orientation='vertical',
+                format=FormatStrFormatter('%.2f'),
+            )
             cbar3.set_label('Normalised Flux')
             cbar3 = DraggableColorbar(cbar3,imgo)
             cbar3.connect()
@@ -1854,7 +1835,7 @@ class spruit:
         show: Optional[bool] = None,
         cmaps=None,
     ):
-        """Plot or return residual diagnostics for the reconstruction.
+        """Return residual diagnostics for the reconstruction.
 
         Parameters
         ----------
@@ -1864,14 +1845,9 @@ class spruit:
         sigma:
             Optional uncertainty array with the same shape as ``dm``. When not
             provided a Poisson-like estimate ``sqrt(|dm|)`` is used.
-        bins:
-            Number of bins in the residual histogram.
-        vmax:
-            Upper limit for the absolute normalised residual image.
-        plot, show:
-            Control plotting. Defaults follow ``self.plot``.
-        cmaps:
-            Matplotlib colormap to use for the residual image.
+        bins, vmax, plot, show, cmaps:
+            Deprecated plotting arguments retained for backward compatibility.
+            They are ignored because residual plotting has been removed.
 
         Returns
         -------
@@ -1897,53 +1873,6 @@ class spruit:
         with np.errstate(divide="ignore", invalid="ignore"):
             norm_residuals = residuals / sigma
 
-        if plot is None:
-            plot = bool(self.plot)
-        if show is None:
-            show = bool(plot)
-        if not plot:
-            return residuals, norm_residuals
-
-        _, plt = _lazy_import_matplotlib_pyplot()
-        if cmaps is None:
-            cmaps = plt.cm.viridis
-        cmap_plot = cmaps.copy() if hasattr(cmaps, "copy") else cmaps
-        if hasattr(cmap_plot, "set_bad"):
-            cmap_plot.set_bad(color="0.85")
-
-        fig = plt.figure("Residuals", figsize=(10, 4))
-        plt.clf()
-
-        ax_img = fig.add_subplot(121)
-        img = ax_img.imshow(
-            np.abs(norm_residuals.T),
-            aspect="auto",
-            origin="upper",
-            vmin=0.0,
-            vmax=vmax,
-            cmap=cmap_plot,
-        )
-        ax_img.set_title("|Residual| / sigma")
-        ax_img.set_xlabel("Velocity bin")
-        ax_img.set_ylabel("Phase bin")
-        plt.colorbar(img, ax=ax_img, fraction=0.046, pad=0.04)
-
-        ax_hist = fig.add_subplot(122)
-        vals = norm_residuals[np.isfinite(norm_residuals)].ravel()
-        ax_hist.hist(vals, bins=bins, histtype="step", density=True, color="k")
-        mu = float(np.nanmedian(vals)) if vals.size else 0.0
-        std = float(np.nanstd(vals)) if vals.size else 1.0
-        x = np.linspace(mu - 5 * std, mu + 5 * std, 200)
-        if std > 0 and np.isfinite(std):
-            gauss = (1.0 / (std * np.sqrt(2 * np.pi))) * np.exp(-0.5 * ((x - mu) / std) ** 2)
-            ax_hist.plot(x, gauss, color="green", lw=1.5, label=f"N({mu:.2f}, {std:.2f})")
-            ax_hist.legend(frameon=False, fontsize=10)
-        ax_hist.axvline(mu, ls="--", color="red", alpha=0.7)
-        ax_hist.set_xlabel("Residual / sigma")
-        ax_hist.set_ylabel("Density")
-        plt.tight_layout()
-        if show:
-            plt.show()
         return residuals, norm_residuals
 
 def rebin_trail(waver, flux, input_phase, nbins, delp, rebin_wave=None):

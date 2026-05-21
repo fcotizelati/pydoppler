@@ -259,8 +259,7 @@
 
 
   <p align="middle">
-     <img src="pydoppler/test_data/output_images/Average_Spec.png" width="350" height="450" />
-     <img src="pydoppler/test_data/output_images/Trail.png" width="350" height="450" />
+     <img src="pydoppler/test_data/output_images/Trail.png" alt="Velocity profile and trailed spectra" width="430" />
   </p>
 
   ### Section 3.3: Run the Fortran code
@@ -277,7 +276,7 @@
   contours and streams.
   ```python
   # Read and plot map
-  cb,data = dop.Dopmap(limits=[0.05,0.99],colorbar=True,cmaps=plt.cm.magma_r,
+  cb,data = dop.Dopmap(limits=[0.05,0.99],colorbar=True,cmaps=plt.cm.magma,
   					smooth=False,remove_mean=False)
   # Overplot the donor contours, keplerian and ballistic streams
   qm=0.35   # mass ratio M_2 / M_1
@@ -290,7 +289,7 @@
   pydoppler.stream(qm,k1,porb,m1,inc)
   ```
   <p align="middle">
-     <img src="pydoppler/test_data/output_images/Doppler_Map.png" width="520" height="450" />
+     <img src="pydoppler/test_data/output_images/Doppler_Map.png" alt="Doppler tomogram" width="560" />
   </p>
 
   ### Section 3.5: Spectra reconstruction
@@ -300,19 +299,18 @@
 
   ```python
   # plot trail spectra
-  cb2,cb3,dmr,dm = dop.Reco(colorbar=True,limits=[.05,0.95],cmaps=plt.cm.magma_r)
+  cb2,cb3,dmr,dm = dop.Reco(colorbar=True,limits=[.05,0.95],cmaps=plt.cm.magma)
   ```
   where the output variables cb2 and cb3 hold the colorbar objects (if selected); dmr and dm hold the data cubes for the reconstructed trail spectra and the binned data, respectively.
   <p align="middle">
-     <img src="pydoppler/test_data/output_images/Reconstruction.png" width="520" height="450" />
+     <img src="pydoppler/test_data/output_images/Reconstruction.png" alt="Input and reconstructed trailed spectra" width="720" />
   </p>
 
   ### Section 3.6: Residual diagnostics
-  A lightweight residual diagnostic is available to verify that the reconstructed
-  trail matches the input data.
+  Residual arrays can be computed without generating an extra figure.
 
   ```python
-  dop.Residuals()
+  residuals, norm_residuals = dop.Residuals(dm=dm, dmr=dmr, plot=False)
   ```
 
   ## Section 4: Extra commands

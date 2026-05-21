@@ -56,8 +56,8 @@ def main() -> None:
     # You can overplot contours and streams.
     _cbar, _data = dop.Dopmap(
         limits=[0.05, 0.99],
-        colorbar=False,
-        cmaps=plt.cm.magma_r,
+        colorbar=True,
+        cmaps=plt.cm.magma,
         smooth=False,
         remove_mean=False,
         show=False,
@@ -76,23 +76,21 @@ def main() -> None:
     # rule of thumb "If a feature on the Doppler tomogram is not in the trail,
     # most likely its not real!"
     _cbar2, _cbar3, dmr, dm = dop.Reco(
-        colorbar=False,
+        colorbar=True,
         limits=[.05, 0.95],
-        cmaps=plt.cm.magma_r,
+        cmaps=plt.cm.magma,
         show=False,
     )
-
-    dop.Residuals(dm=dm, dmr=dmr, show=False)
 
     if SAVE_PNGS:
         outdir = workdir / "output_images"
         outdir.mkdir(parents=True, exist_ok=True)
+        for stale_name in ("Average_Spec.png", "Residuals.png"):
+            (outdir / stale_name).unlink(missing_ok=True)
         figures = {
-            "Average Spec": "Average_Spec.png",
             "Trail": "Trail.png",
             "Doppler Map": "Doppler_Map.png",
             "Reconstruction": "Reconstruction.png",
-            "Residuals": "Residuals.png",
         }
         existing = set(plt.get_figlabels())
         for label, filename in figures.items():
