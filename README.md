@@ -259,7 +259,7 @@
 
 
   <p align="middle">
-     <a href="pydoppler/test_data/output_images/Trail.pdf">Velocity profile and trailed spectra PDF</a>
+     <img src="docs/readme_images/Trail.svg" alt="Velocity profile and trailed spectra" width="430" />
   </p>
 
   ### Section 3.3: Run the Fortran code
@@ -289,7 +289,7 @@
   pydoppler.stream(qm,k1,porb,m1,inc)
   ```
   <p align="middle">
-     <a href="pydoppler/test_data/output_images/Doppler_Map.pdf">Doppler tomogram PDF</a>
+     <img src="docs/readme_images/Doppler_Map.svg" alt="Doppler tomogram" width="560" />
   </p>
 
   ### Section 3.5: Spectra reconstruction
@@ -303,7 +303,7 @@
   ```
   where the output variables cb2 and cb3 hold the colorbar objects (if selected); dmr and dm hold the data cubes for the reconstructed trail spectra and the binned data, respectively.
   <p align="middle">
-     <a href="pydoppler/test_data/output_images/Reconstruction.pdf">Input and reconstructed trailed spectra PDF</a>
+     <img src="docs/readme_images/Reconstruction.svg" alt="Input and reconstructed trailed spectra" width="720" />
   </p>
 
   ### Section 3.6: Residual diagnostics
