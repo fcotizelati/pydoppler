@@ -3,8 +3,8 @@ from pathlib import Path
 
 import pydoppler
 
-# Set to True to save figures and run without GUI windows.
-SAVE_PNGS = True
+# Set to True to save PDF figures and run without GUI windows.
+SAVE_PDFS = True
 # Set to True to display figures interactively at the end.
 SHOW_PLOTS = False
 
@@ -12,7 +12,7 @@ SHOW_PLOTS = False
 def main() -> None:
     # Fortran execution + outputs are isolated in this directory.
     workdir = Path.cwd() / "pydoppler-workdir"
-    if SAVE_PNGS and not SHOW_PLOTS:
+    if SAVE_PDFS and not SHOW_PLOTS:
         os.environ.setdefault("MPLBACKEND", "Agg")
         os.environ.setdefault("MPLCONFIGDIR", str(workdir / ".mplconfig"))
 
@@ -82,15 +82,23 @@ def main() -> None:
         show=False,
     )
 
-    if SAVE_PNGS:
+    if SAVE_PDFS:
         outdir = workdir / "output_images"
         outdir.mkdir(parents=True, exist_ok=True)
-        for stale_name in ("Average_Spec.png", "Residuals.png"):
+        for stale_name in (
+            "Average_Spec.pdf",
+            "Residuals.pdf",
+            "Average_Spec.png",
+            "Residuals.png",
+            "Trail.png",
+            "Doppler_Map.png",
+            "Reconstruction.png",
+        ):
             (outdir / stale_name).unlink(missing_ok=True)
         figures = {
-            "Trail": "Trail.png",
-            "Doppler Map": "Doppler_Map.png",
-            "Reconstruction": "Reconstruction.png",
+            "Trail": "Trail.pdf",
+            "Doppler Map": "Doppler_Map.pdf",
+            "Reconstruction": "Reconstruction.pdf",
         }
         existing = set(plt.get_figlabels())
         for label, filename in figures.items():

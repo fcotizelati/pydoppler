@@ -51,5 +51,5 @@ def test_copy_test_data_copies_dataset(tmp_path: Path):
     copied = pydoppler.copy_test_data(tmp_path)
 
     assert (tmp_path / "ugem99" / "ugem0all.fas").is_file()
-    assert (tmp_path / "output_images" / "Doppler_Map.png").is_file()
+    assert (tmp_path / "output_images" / "Doppler_Map.pdf").is_file()
     assert all(path.is_file() for path in copied)
